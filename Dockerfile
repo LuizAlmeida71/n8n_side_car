@@ -2,7 +2,7 @@
 FROM python:3.11-slim
 
 # ▶ Instala dependências
-RUN pip install --no-cache fastapi uvicorn pandas openpyxl
+RUN pip install --no-cache fastapi uvicorn pandas openpyxl python-multipart
 
 # ▶ Copia o app
 WORKDIR /app
