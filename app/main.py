@@ -8,18 +8,18 @@ app = FastAPI()
 @app.post("/normalize")
 async def normalize(request: Request):
     try:
-        body = await request.json()
-        if "Files" not in body or not isinstance(body["Files"], list):
+        payload = await request.json()
+        if "Files" not in payload or not isinstance(payload["Files"], list):
             raise HTTPException(status_code=400, detail="400: Campo 'Files' ausente ou inválido")
-
-        df = pd.DataFrame(body["Files"])
+        data = payload["Files"]
+        df = pd.DataFrame(data[1:], columns=data[0])
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Erro ao processar JSON: {str(e)}")
 
     try:
         meta = {'unidade': None, 'setor': None, 'mes': None, 'ano': None}
         for _, row in df.iterrows():
-            txt = " ".join(str(x) for x in row if pd.notna(x)).upper()
+            txt = " ".join(str(x) for x in row if x).upper()
             if "UNIDADE" in txt and not meta['unidade']:
                 meta['unidade'] = txt.split(":", 1)[-1].strip()
             if "SETOR" in txt and not meta['setor']:
@@ -32,11 +32,9 @@ async def normalize(request: Request):
         header_row_idx = df[df.apply(lambda r: {"NOME", "CARGO"}.issubset(
             {str(x).upper() for x in r if pd.notna(x)}), axis=1)].index
 
-        if len(header_row_idx) == 0:
-            raise HTTPException(status_code=400, detail="Cabeçalho não encontrado.")
-
-        df.columns = df.iloc[header_row_idx[0]]
-        df = df.iloc[header_row_idx[0] + 1:]
+        if len(header_row_idx) > 0:
+            df.columns = df.iloc[header_row_idx[0]]
+            df = df.iloc[header_row_idx[0] + 1:]
 
         df = df.dropna(how="all")
         df = df[~df.iloc[:, 0].astype(str).str.contains("LEGENDA", na=False)]
