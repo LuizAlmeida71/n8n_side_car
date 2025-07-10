@@ -9,6 +9,10 @@ app = FastAPI()
 async def normalize(request: Request):
     try:
         data = await request.json()
+
+        if isinstance(data, dict):
+            data = [data]
+
         df = pd.DataFrame(data)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Erro ao processar JSON: {str(e)}")
@@ -53,6 +57,7 @@ async def normalize(request: Request):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro na normalização: {str(e)}")
+
 
 
 
