@@ -26,6 +26,7 @@ async def normalize(request: Request):
 
     try:
         frames = []
+
         for ws in wb.worksheets:
             try:
                 ws.unmerge_cells()
@@ -35,27 +36,34 @@ async def normalize(request: Request):
                 for _, row in df.iterrows():
                     txt = " ".join(str(x) for x in row if x).upper()
                     if "UNIDADE" in txt and not meta['unidade']:
-                        meta['unidade'] = txt.split(":",1)[-1].strip()
+                        meta['unidade'] = txt.split(":", 1)[-1].strip()
                     if "SETOR" in txt and not meta['setor']:
-                        meta['setor'] = txt.split(":",1)[-1].strip()
+                        meta['setor'] = txt.split(":", 1)[-1].strip()
                     if ("MÊS" in txt or "MES" in txt) and not meta['mes']:
                         ma = re.search(r'(\w+)[^\d]*(\d{4})', txt)
                         if ma:
                             meta['mes'], meta['ano'] = ma.group(1), int(ma.group(2))
 
-                header_row = df[df.apply(lambda r: {"NOME", "CARGO"}.issubset(
-                                         {str(x).upper() for x in r if pd.notna(x)}), axis=1)].index
+                # NOVA LÓGICA PARA DETECTAR CABEÇALHO
+                possible_nome = {"NOME", "NOME COMPLETO"}
+                possible_cargo = {"CARGO", "CARGO/FUNÇÃO"}
+
+                def is_header(row):
+                    texts = {str(x).strip().upper() for x in row if pd.notna(x)}
+                    return any(n in texts for n in possible_nome) and any(c in texts for c in possible_cargo)
+
+                header_row = df[df.apply(is_header, axis=1)].index
 
                 if len(header_row) == 0:
                     continue
 
                 df.columns = df.iloc[header_row[0]]
                 df = df.iloc[header_row[0]+1:]
-
                 df = df.dropna(how="all")
-                df = df[~df.iloc[:,0].astype(str).str.contains("LEGENDA", na=False)]
+                df = df[~df.iloc[:, 0].astype(str).str.contains("LEGENDA", na=False)]
 
-                ren = {"NOME COMPLETO": "nome", "NOME": "nome", "CARGO": "cargo"}
+                # Renomeia colunas para garantir compatibilidade
+                ren = {"NOME COMPLETO": "nome", "NOME": "nome", "CARGO": "cargo", "CARGO/FUNÇÃO": "cargo"}
                 df = df.rename(columns=ren)
 
                 if "nome" not in df.columns or "cargo" not in df.columns:
