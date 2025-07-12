@@ -1,89 +1,45 @@
-from fastapi import FastAPI, Request, HTTPException
+# main.py
+from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import JSONResponse
-import pandas as pd
-import re
-import io
-import base64
-import openpyxl
+from openpyxl import load_workbook
+import tempfile
+import uvicorn
 
 app = FastAPI()
 
-@app.post("/normalize")
-async def normalize(request: Request):
+@app.post("/xlsx-to-json")
+async def convert_xlsx_to_json(file: UploadFile = File(...)):
     try:
-        payload = await request.json()
-        files = payload.get("Files")
-        if not files or not isinstance(files, list) or not files[0].get("FileData"):
-            raise HTTPException(status_code=400, detail="400: Campo 'Files' ausente ou inválido")
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
+            contents = await file.read()
+            tmp.write(contents)
+            tmp_path = tmp.name
 
-        file_data_b64 = files[0]["FileData"]
-        file_bytes = base64.b64decode(file_data_b64)
-        buf = io.BytesIO(file_bytes)
-        wb = openpyxl.load_workbook(buf, data_only=True)
+        workbook = load_workbook(filename=tmp_path, data_only=True)
+        all_data = {}
 
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Erro ao processar JSON: {str(e)}")
+        for sheet_name in workbook.sheetnames:
+            sheet = workbook[sheet_name]
+            rows = list(sheet.iter_rows(values_only=True))
 
-    try:
-        frames = []
-
-        for ws in wb.worksheets:
-            try:
-                ws.unmerge_cells()
-                df = pd.DataFrame(ws.values)
-
-                meta = {'unidade': None, 'setor': None, 'mes': None, 'ano': None}
-                for _, row in df.iterrows():
-                    txt = " ".join(str(x) for x in row if x).upper()
-                    if "UNIDADE" in txt and not meta['unidade']:
-                        meta['unidade'] = txt.split(":", 1)[-1].strip()
-                    if "SETOR" in txt and not meta['setor']:
-                        meta['setor'] = txt.split(":", 1)[-1].strip()
-                    if ("MÊS" in txt or "MES" in txt) and not meta['mes']:
-                        ma = re.search(r'(\w+)[^\d]*(\d{4})', txt)
-                        if ma:
-                            meta['mes'], meta['ano'] = ma.group(1), int(ma.group(2))
-
-                # NOVA LÓGICA PARA DETECTAR CABEÇALHO
-                possible_nome = {"NOME", "NOME COMPLETO"}
-                possible_cargo = {"CARGO", "CARGO/FUNÇÃO"}
-
-                def is_header(row):
-                    texts = {str(x).strip().upper() for x in row if pd.notna(x)}
-                    return any(n in texts for n in possible_nome) and any(c in texts for c in possible_cargo)
-
-                header_row = df[df.apply(is_header, axis=1)].index
-
-                if len(header_row) == 0:
-                    continue
-
-                df.columns = df.iloc[header_row[0]]
-                df = df.iloc[header_row[0]+1:]
-                df = df.dropna(how="all")
-                df = df[~df.iloc[:, 0].astype(str).str.contains("LEGENDA", na=False)]
-
-                # Renomeia colunas para garantir compatibilidade
-                ren = {"NOME COMPLETO": "nome", "NOME": "nome", "CARGO": "cargo", "CARGO/FUNÇÃO": "cargo"}
-                df = df.rename(columns=ren)
-
-                if "nome" not in df.columns or "cargo" not in df.columns:
-                    continue
-
-                day_cols = [c for c in df.columns if str(c).isdigit()]
-                df = df.melt(id_vars=["nome", "cargo"], value_vars=day_cols,
-                             var_name="dia", value_name="turno").dropna(subset=["turno"])
-
-                df = df.assign(**meta)
-                frames.append(df)
-
-            except Exception:
+            if not rows:
                 continue
 
-        if not frames:
-            raise HTTPException(status_code=500, detail="Nenhuma aba válida foi processada.")
+            headers = [str(cell).strip() if cell is not None else "" for cell in rows[0]]
+            data_rows = rows[1:]
+            data = []
 
-        final_df = pd.concat(frames, ignore_index=True)
-        return JSONResponse(content=final_df.to_dict(orient="records"))
+            for row in data_rows:
+                row_dict = {headers[i]: row[i] for i in range(len(headers)) if headers[i] != ""}
+                data.append(row_dict)
+
+            all_data[sheet_name] = data
+
+        return JSONResponse(content=all_data)
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro na normalização: {str(e)}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+# Para rodar localmente:
+# if __name__ == "__main__":
+#     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
