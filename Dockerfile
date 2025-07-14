@@ -1,13 +1,19 @@
 # ▶ Base leve
 FROM python:3.11-slim
 
-# ▶ Instala dependências
-RUN pip install --no-cache fastapi uvicorn pandas openpyxl python-multipart
-
-# ▶ Copia o app
+# ▶ Define diretório de trabalho
 WORKDIR /app
+
+# ▶ Copia arquivos
+COPY requirements.txt ./
 COPY app ./app
 
-# ▶ Porta; Railway injeta $PORT em runtime
+# ▶ Instala dependências do projeto
+RUN pip install --no-cache-dir -r requirements.txt
+
+# ▶ Porta (Railway injeta $PORT)
 ENV PORT=8000
+
+# ▶ Comando de inicialização
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
