@@ -4,6 +4,7 @@ from fastapi.responses import JSONResponse
 from openpyxl import load_workbook
 import tempfile
 import uvicorn
+import fitz
 
 app = FastAPI()
 
