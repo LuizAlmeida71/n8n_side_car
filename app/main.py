@@ -40,6 +40,38 @@ async def convert_xlsx_to_json(file: UploadFile = File(...)):
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
+@app.post("/split-pdf")
+async def split_pdf(file: UploadFile = File(...)):
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            contents = await file.read()
+            tmp.write(contents)
+            tmp_path = tmp.name
+
+        doc = fitz.open(tmp_path)
+        pages_b64 = []
+
+        for i in range(len(doc)):
+            single_page = fitz.open()
+            single_page.insert_pdf(doc, from_page=i, to_page=i)
+            page_path = f"/tmp/page_{i+1}.pdf"
+            single_page.save(page_path)
+
+            with open(page_path, "rb") as f:
+                b64_content = base64.b64encode(f.read()).decode("utf-8")
+                pages_b64.append({
+                    "page": i + 1,
+                    "file_base64": b64_content,
+                    "filename": f"page_{i+1}.pdf"
+                })
+
+            os.remove(page_path)  # limpa a página temporária
+
+        return JSONResponse(content={"pages": pages_b64})
+
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500})
+
 # Para rodar localmente:
 # if __name__ == "__main__":
 #     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
