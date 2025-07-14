@@ -1,12 +1,16 @@
 # main.py
 from fastapi import FastAPI, UploadFile, File
+from fastapi import Body
+from typing import List, Dict
 from fastapi.responses import JSONResponse
 from openpyxl import load_workbook
+from datetime import datetime
 import tempfile
 import uvicorn
 import fitz
 import base64
 import os
+import re
 
 
 app = FastAPI()
@@ -72,6 +76,56 @@ async def split_pdf(file: UploadFile = File(...)):
             os.remove(page_path)  # limpa a página temporária
 
         return JSONResponse(content={"pages": pages_b64})
+
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+@app.post("/normaliza-pdf")
+async def normaliza_pdf(pages: Dict = Body(...)):
+    try:
+        textos_por_pagina = []
+        for page in pages.get("pages", []):
+            file_data = base64.b64decode(page["file_base64"])
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
+                tmp_pdf.write(file_data)
+                tmp_pdf_path = tmp_pdf.name
+
+            with fitz.open(tmp_pdf_path) as doc:
+                texto = doc[0].get_text()
+                textos_por_pagina.append(texto)
+
+        texto_completo = "\n".join(textos_por_pagina)
+        # Aqui você colocará a lógica completa de extração, como no seu nó “Transforma Escalas – Dinâmico”
+        # Você pode modularizar isso para reaproveitar
+
+        resultado_normalizado = {
+            "unidade_escala": "HOSPITAL EXEMPLO",
+            "mes_ano_escala": "JULHO/2025",
+            "profissionais": []
+        }
+
+        # Lógica fictícia de exemplo (substituir por real):
+        for match in re.finditer(r"(?P<nome>[\w\s]+)\s+RP\.PAES.*\n(?P<linha>.+)", texto_completo):
+            nome = match.group("nome").strip()
+            linha = match.group("linha")
+            resultado_normalizado["profissionais"].append({
+                "medico_nome": nome,
+                "medico_crm": "",
+                "medico_especialidade": "ESPECIALISTA",
+                "medico_vinculo": "RP.PAES",
+                "medico_setor": "Setor Exemplo",
+                "plantoes": [
+                    {
+                        "dia": 10,
+                        "data": "10/07/2025",
+                        "turno": "NOITE",
+                        "inicio": "19:00",
+                        "fim": "07:00"
+                    }
+                ]
+            })
+
+        return JSONResponse(content=resultado_normalizado)
 
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
