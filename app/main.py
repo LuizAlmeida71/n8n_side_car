@@ -5,6 +5,7 @@ from openpyxl import load_workbook
 import tempfile
 import uvicorn
 import fitz
+import base64
 
 app = FastAPI()
 
