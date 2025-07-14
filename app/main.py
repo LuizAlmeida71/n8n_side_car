@@ -7,7 +7,7 @@ import uvicorn
 import fitz
 import base64
 import os
-import tempfile
+
 
 app = FastAPI()
 
