@@ -70,7 +70,7 @@ async def split_pdf(file: UploadFile = File(...)):
         return JSONResponse(content={"pages": pages_b64})
 
     except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500})
+        return JSONResponse(content={"error": str(e)}, status_code=500)
 
 # Para rodar localmente:
 # if __name__ == "__main__":
