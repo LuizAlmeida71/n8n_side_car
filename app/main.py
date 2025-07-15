@@ -1,17 +1,15 @@
 # main.py
-from fastapi import FastAPI, UploadFile, File
-from fastapi import Body
+from fastapi import FastAPI, UploadFile, File, Body
+from pydantic import BaseModel
 from typing import List, Dict
 from fastapi.responses import JSONResponse
 from openpyxl import load_workbook
-from datetime import datetime
 import tempfile
 import uvicorn
 import fitz
 import base64
 import os
 import re
-
 
 app = FastAPI()
 
@@ -73,19 +71,28 @@ async def split_pdf(file: UploadFile = File(...)):
                     "filename": f"page_{i+1}.pdf"
                 })
 
-            os.remove(page_path)  # limpa a página temporária
+            os.remove(page_path)
 
         return JSONResponse(content={"pages": pages_b64})
 
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
+
+# --- Modelos para validação explícita ---
+class Page(BaseModel):
+    page: int
+    file_base64: str
+
+class PagesPayload(BaseModel):
+    pages: List[Page]
+
 @app.post("/normaliza-pdf")
-async def normaliza_pdf(pages: Dict = Body(...)):
+async def normaliza_pdf(pages_payload: PagesPayload):
     try:
         textos_por_pagina = []
-        for page in pages.get("pages", []):
-            file_data = base64.b64decode(page["file_base64"])
+        for page in pages_payload.pages:
+            file_data = base64.b64decode(page.file_base64)
             with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
                 tmp_pdf.write(file_data)
                 tmp_pdf_path = tmp_pdf.name
@@ -95,8 +102,6 @@ async def normaliza_pdf(pages: Dict = Body(...)):
                 textos_por_pagina.append(texto)
 
         texto_completo = "\n".join(textos_por_pagina)
-        # Aqui você colocará a lógica completa de extração, como no seu nó “Transforma Escalas – Dinâmico”
-        # Você pode modularizar isso para reaproveitar
 
         resultado_normalizado = {
             "unidade_escala": "HOSPITAL EXEMPLO",
@@ -104,7 +109,7 @@ async def normaliza_pdf(pages: Dict = Body(...)):
             "profissionais": []
         }
 
-        # Lógica fictícia de exemplo (substituir por real):
+        # Sua lógica real de extração e normalização aqui
         for match in re.finditer(r"(?P<nome>[\w\s]+)\s+RP\.PAES.*\n(?P<linha>.+)", texto_completo):
             nome = match.group("nome").strip()
             linha = match.group("linha")
