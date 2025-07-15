@@ -1,5 +1,5 @@
 # main.py
-from fastapi import FastAPI, UploadFile, File, Body
+from fastapi import FastAPI, UploadFile, File, Request
 from pydantic import BaseModel
 from typing import List, Dict
 from fastapi.responses import JSONResponse
@@ -78,62 +78,16 @@ async def split_pdf(file: UploadFile = File(...)):
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
-
-# --- Modelos para validação explícita ---
-class Page(BaseModel):
-    page: int
-    file_base64: str
-
-class PagesPayload(BaseModel):
-    pages: List[Page]
-
 @app.post("/normaliza-pdf")
-async def normaliza_pdf(pages_payload: PagesPayload):
+async def normaliza_pdf(request: Request):
     try:
-        textos_por_pagina = []
-        for page in pages_payload.pages:
-            file_data = base64.b64decode(page.file_base64)
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
-                tmp_pdf.write(file_data)
-                tmp_pdf_path = tmp_pdf.name
-
-            with fitz.open(tmp_pdf_path) as doc:
-                texto = doc[0].get_text()
-                textos_por_pagina.append(texto)
-
-        texto_completo = "\n".join(textos_por_pagina)
-
-        resultado_normalizado = {
-            "unidade_escala": "HOSPITAL EXEMPLO",
-            "mes_ano_escala": "JULHO/2025",
-            "profissionais": []
-        }
-
-        # Sua lógica real de extração e normalização aqui
-        for match in re.finditer(r"(?P<nome>[\w\s]+)\s+RP\.PAES.*\n(?P<linha>.+)", texto_completo):
-            nome = match.group("nome").strip()
-            linha = match.group("linha")
-            resultado_normalizado["profissionais"].append({
-                "medico_nome": nome,
-                "medico_crm": "",
-                "medico_especialidade": "ESPECIALISTA",
-                "medico_vinculo": "RP.PAES",
-                "medico_setor": "Setor Exemplo",
-                "plantoes": [
-                    {
-                        "dia": 10,
-                        "data": "10/07/2025",
-                        "turno": "NOITE",
-                        "inicio": "19:00",
-                        "fim": "07:00"
-                    }
-                ]
-            })
-
-        return JSONResponse(content=resultado_normalizado)
-
+        body = await request.json()
+        return JSONResponse(content={
+            "status": "RECEBIDO",
+            "estrutura": body
+        })
     except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+        return JSONResponse(content={"erro": str(e)}, status_code=400)
 
 # Para rodar localmente:
 # if __name__ == "__main__":
