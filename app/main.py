@@ -1,13 +1,12 @@
 # main.py
 from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.responses import JSONResponse
-from openpyxl import load_workbook
+from openpyxl import Workbook
 import tempfile
 import uvicorn
 import fitz
 import base64
 import os
-import re
 
 app = FastAPI()
 
@@ -19,6 +18,7 @@ async def convert_xlsx_to_json(file: UploadFile = File(...)):
             tmp.write(contents)
             tmp_path = tmp.name
 
+        from openpyxl import load_workbook
         workbook = load_workbook(filename=tmp_path, data_only=True)
         all_data = {}
 
@@ -94,33 +94,22 @@ async def normaliza_pdf(request: Request):
 
         texto_completo = "\n".join(textos_por_pagina)
 
-        resultado_normalizado = {
-            "unidade_escala": "HOSPITAL EXEMPLO",
-            "mes_ano_escala": "JULHO/2025",
-            "profissionais": []
-        }
+        # Cria planilha Excel a partir do texto extraído
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Escala"
 
-        for match in re.finditer(r"(?P<nome>[\w\s]+)\s+RP\.PAES.*\n(?P<linha>.+)", texto_completo):
-            nome = match.group("nome").strip()
-            linha = match.group("linha")
-            resultado_normalizado["profissionais"].append({
-                "medico_nome": nome,
-                "medico_crm": "",
-                "medico_especialidade": "ESPECIALISTA",
-                "medico_vinculo": "RP.PAES",
-                "medico_setor": "Setor Exemplo",
-                "plantoes": [
-                    {
-                        "dia": 10,
-                        "data": "10/07/2025",
-                        "turno": "NOITE",
-                        "inicio": "19:00",
-                        "fim": "07:00"
-                    }
-                ]
-            })
+        # Cabeçalhos de exemplo
+        ws.append(["Página", "Conteúdo"])
+        for i, texto in enumerate(textos_por_pagina, 1):
+            ws.append([i, texto.strip()])
 
-        return JSONResponse(content=resultado_normalizado)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp_xlsx:
+            wb.save(tmp_xlsx.name)
+            tmp_xlsx.seek(0)
+            b64_xlsx = base64.b64encode(tmp_xlsx.read()).decode("utf-8")
+
+        return JSONResponse(content={"file_base64": b64_xlsx, "filename": "escala_normalizada.xlsx"})
 
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
