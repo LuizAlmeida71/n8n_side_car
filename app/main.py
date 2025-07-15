@@ -1,8 +1,5 @@
 # main.py
-from fastapi import FastAPI, UploadFile, File
-from pydantic import BaseModel
-from fastapi import Body
-from typing import List
+from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.responses import JSONResponse
 from openpyxl import load_workbook
 import tempfile
@@ -79,20 +76,14 @@ async def split_pdf(file: UploadFile = File(...)):
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
-# --- Validação formal via Pydantic ---
-class Page(BaseModel):
-    page: int
-    file_base64: str
-
-class PagesPayload(BaseModel):
-    pages: List[Page]
-
 @app.post("/normaliza-pdf")
-async def normaliza_pdf(pages_payload: PagesPayload):
+async def normaliza_pdf(request: Request):
     try:
+        body = await request.json()
         textos_por_pagina = []
-        for page in pages_payload.pages:
-            file_data = base64.b64decode(page.file_base64)
+
+        for page in body.get("pages", []):
+            file_data = base64.b64decode(page["file_base64"])
             with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
                 tmp_pdf.write(file_data)
                 tmp_pdf_path = tmp_pdf.name
@@ -109,7 +100,6 @@ async def normaliza_pdf(pages_payload: PagesPayload):
             "profissionais": []
         }
 
-        # Exemplo fictício de extração (substituir por lógica real):
         for match in re.finditer(r"(?P<nome>[\w\s]+)\s+RP\.PAES.*\n(?P<linha>.+)", texto_completo):
             nome = match.group("nome").strip()
             linha = match.group("linha")
