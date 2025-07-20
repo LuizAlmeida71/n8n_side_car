@@ -132,12 +132,15 @@ async def text_to_pdf(request: Request):
         pdf.set_font("DejaVu", size=12)
 
         for line in text.split("\n"):
-            # ⚠️ Corrige erro "not enough horizontal space..."
-            if len(line) > 120:
-                for subline in [line[i:i+120] for i in range(0, len(line), 120)]:
-                    pdf.multi_cell(0, 10, txt=subline)
-            else:
-                pdf.multi_cell(0, 10, txt=line)
+            if not line.strip():
+                pdf.ln()
+                continue
+
+            # ⚠️ Quebra linhas longas manualmente para evitar erro de largura
+            while len(line) > 0:
+                chunk = line[:120]
+                pdf.multi_cell(0, 10, txt=chunk)
+                line = line[120:]
 
         pdf_bytes = pdf.output(dest='S').encode("latin1")
         base64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
