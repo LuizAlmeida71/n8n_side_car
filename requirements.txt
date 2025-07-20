@@ -4,5 +4,4 @@ pandas
 openpyxl
 python-multipart
 PyMuPDF
-fpdf==1.7.2
-
+fpdf2==2.7.8
