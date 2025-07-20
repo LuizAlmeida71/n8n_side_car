@@ -8,6 +8,9 @@ WORKDIR /app
 COPY requirements.txt ./
 COPY app ./app
 
+# ▶ Instala dependências do sistema (fonte DejaVu necessária para PDF)
+RUN apt-get update && apt-get install -y fonts-dejavu-core
+
 # ▶ Instala dependências do projeto
 RUN pip install --no-cache-dir -r requirements.txt
 
@@ -16,4 +19,3 @@ ENV PORT=8000
 
 # ▶ Comando de inicialização
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
-
