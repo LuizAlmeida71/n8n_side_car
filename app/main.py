@@ -115,6 +115,13 @@ async def normaliza_pdf(request: Request):
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
+from fastapi import Request
+from fastapi.responses import JSONResponse
+from fpdf import FPDF
+import base64
+import os
+import textwrap
+
 @app.post("/text-to-pdf")
 async def text_to_pdf(request: Request):
     try:
@@ -129,10 +136,13 @@ async def text_to_pdf(request: Request):
         pdf.add_page()
         pdf.set_auto_page_break(auto=True, margin=15)
         pdf.add_font("DejaVu", "", FONT_PATH, uni=True)
-        pdf.set_font("DejaVu", size=12)
+        pdf.set_font("DejaVu", size=10)
 
         for line in text.split("\n"):
-            pdf.multi_cell(0, 10, txt=line)
+            # Corrige linhas longas sem espaços
+            wrapped_lines = textwrap.wrap(line, width=100, break_long_words=True)
+            for wrapped_line in wrapped_lines:
+                pdf.multi_cell(0, 8, txt=wrapped_line)
 
         pdf_bytes = pdf.output(dest='S').encode("latin1")
         base64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
@@ -140,4 +150,5 @@ async def text_to_pdf(request: Request):
         return JSONResponse(content={"file_base64": base64_pdf, "filename": filename})
 
     except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+        return JSONResponse(content={"error": str(e)}, status_code=500})
+
