@@ -18,5 +18,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 ENV PORT=8000
 
 # ▶ Comando corrigido: aumenta limite de payload para 100MB
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--limit-max-request-size", "100"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--max-body-size", "100"]
 
