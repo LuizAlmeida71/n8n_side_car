@@ -119,7 +119,6 @@ async def normaliza_pdf(request: Request):
 #     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
 
 from fpdf import FPDF
-from io import BytesIO
 
 @app.post("/text-to-pdf")
 async def text_to_pdf(request: Request):
@@ -136,13 +135,10 @@ async def text_to_pdf(request: Request):
         for line in text.split("\n"):
             pdf.multi_cell(0, 10, txt=line)
 
-        pdf_bytes = BytesIO()
-        pdf.output(pdf_bytes)
-        pdf_bytes.seek(0)
+        pdf_bytes = pdf.output(dest='S').encode('latin1')
+        base64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
 
-        base64_pdf = base64.b64encode(pdf_bytes.read()).decode("utf-8")
         return JSONResponse(content={"file_base64": base64_pdf, "filename": filename})
 
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
-
