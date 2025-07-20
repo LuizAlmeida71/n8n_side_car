@@ -162,4 +162,4 @@ async def text_to_pdf(request: Request):
         return JSONResponse(content={"file_base64": base64_pdf, "filename": filename})
 
     except Exception as e:
-        return JSONResponse(content={"error": str(e)}
+        return JSONResponse(content={"error": str(e)}, status_code=500)
