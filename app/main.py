@@ -1,14 +1,16 @@
 # main.py
 from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.responses import JSONResponse
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 import tempfile
-import uvicorn
-import fitz
+import fitz  # PyMuPDF
 import base64
 import os
+from fpdf import FPDF
 
 app = FastAPI()
+
+FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
 @app.post("/xlsx-to-json")
 async def convert_xlsx_to_json(file: UploadFile = File(...)):
@@ -18,7 +20,6 @@ async def convert_xlsx_to_json(file: UploadFile = File(...)):
             tmp.write(contents)
             tmp_path = tmp.name
 
-        from openpyxl import load_workbook
         workbook = load_workbook(filename=tmp_path, data_only=True)
         all_data = {}
 
@@ -43,6 +44,7 @@ async def convert_xlsx_to_json(file: UploadFile = File(...)):
 
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
+
 
 @app.post("/split-pdf")
 async def split_pdf(file: UploadFile = File(...)):
@@ -74,7 +76,8 @@ async def split_pdf(file: UploadFile = File(...)):
         return JSONResponse(content={"pages": pages_b64})
 
     except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+        return JSONResponse(content={"error": str(e)}, status_code=500})
+
 
 @app.post("/normaliza-pdf")
 async def normaliza_pdf(request: Request):
@@ -94,12 +97,9 @@ async def normaliza_pdf(request: Request):
 
         texto_completo = "\n".join(textos_por_pagina)
 
-        # Cria planilha Excel a partir do texto extraído
         wb = Workbook()
         ws = wb.active
         ws.title = "Escala"
-
-        # Cabeçalhos de exemplo
         ws.append(["Página", "Conteúdo"])
         for i, texto in enumerate(textos_por_pagina, 1):
             ws.append([i, texto.strip()])
@@ -112,20 +112,8 @@ async def normaliza_pdf(request: Request):
         return JSONResponse(content={"file_base64": b64_xlsx, "filename": "escala_normalizada.xlsx"})
 
     except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+        return JSONResponse(content={"error": str(e)}, status_code=500})
 
-# Para rodar localmente:
-# if __name__ == "__main__":
-#     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-from fpdf import FPDF
-import base64
-
-
-# Caminho da fonte que suporta caracteres Unicode como “ç”, “ã”, “…” etc.
-FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
 @app.post("/text-to-pdf")
 async def text_to_pdf(request: Request):
@@ -137,19 +125,16 @@ async def text_to_pdf(request: Request):
         pdf = FPDF()
         pdf.add_page()
         pdf.set_auto_page_break(auto=True, margin=15)
-
-        # Adiciona a fonte Unicode do sistema (DejaVu)
         pdf.add_font("DejaVu", "", FONT_PATH, uni=True)
         pdf.set_font("DejaVu", size=12)
 
         for line in text.split("\n"):
             pdf.multi_cell(0, 10, txt=line)
 
-        # Usa latin1 porque fpdf espera bytes compatíveis
         pdf_bytes = pdf.output(dest='S').encode("latin1")
         base64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
 
         return JSONResponse(content={"file_base64": base64_pdf, "filename": filename})
 
     except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+        return JSONResponse(content={"error": str(e)}, status_code=500})
