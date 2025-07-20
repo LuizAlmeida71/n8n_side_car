@@ -126,11 +126,16 @@ import textwrap
 async def text_to_pdf(request: Request):
     try:
         data = await request.json()
-        text = data.get("text", "")
+        raw_text = data.get("text", "")
         filename = data.get("filename", "saida.pdf")
 
         if not os.path.exists(FONT_PATH):
             raise RuntimeError(f"Fonte não encontrada em: {FONT_PATH}")
+
+        # Pré-processamento: substitui múltiplos \n e quebras "duplas"
+        clean_text = raw_text.replace("\r", "").replace("\n", " ")
+        clean_text = " ".join(clean_text.split())  # remove múltiplos espaços
+        lines = [clean_text[i:i+120] for i in range(0, len(clean_text), 120)]
 
         pdf = FPDF()
         pdf.add_page()
@@ -138,11 +143,8 @@ async def text_to_pdf(request: Request):
         pdf.add_font("DejaVu", "", FONT_PATH, uni=True)
         pdf.set_font("DejaVu", size=10)
 
-        for line in text.split("\n"):
-            # Corrige linhas longas sem espaços
-            wrapped_lines = textwrap.wrap(line, width=100, break_long_words=True)
-            for wrapped_line in wrapped_lines:
-                pdf.multi_cell(0, 8, txt=wrapped_line)
+        for line in lines:
+            pdf.multi_cell(w=190, h=8, txt=line)  # << largura explícita evita quebra
 
         pdf_bytes = pdf.output(dest='S').encode("latin1")
         base64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
