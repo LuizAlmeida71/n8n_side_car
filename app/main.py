@@ -1,4 +1,3 @@
-# main.py
 from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.responses import JSONResponse
 from openpyxl import Workbook, load_workbook
@@ -10,6 +9,7 @@ from fpdf import FPDF
 
 app = FastAPI()
 
+# Caminho da fonte para PDF com acentos
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
 @app.post("/xlsx-to-json")
@@ -76,7 +76,7 @@ async def split_pdf(file: UploadFile = File(...)):
         return JSONResponse(content={"pages": pages_b64})
 
     except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500})
+        return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
 @app.post("/normaliza-pdf")
@@ -112,7 +112,7 @@ async def normaliza_pdf(request: Request):
         return JSONResponse(content={"file_base64": b64_xlsx, "filename": "escala_normalizada.xlsx"})
 
     except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500})
+        return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
 @app.post("/text-to-pdf")
@@ -121,6 +121,9 @@ async def text_to_pdf(request: Request):
         data = await request.json()
         text = data.get("text", "")
         filename = data.get("filename", "saida.pdf")
+
+        if not os.path.exists(FONT_PATH):
+            raise RuntimeError(f"Fonte não encontrada em: {FONT_PATH}")
 
         pdf = FPDF()
         pdf.add_page()
@@ -137,4 +140,4 @@ async def text_to_pdf(request: Request):
         return JSONResponse(content={"file_base64": base64_pdf, "filename": filename})
 
     except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500})
+        return JSONResponse(content={"error": str(e)}, status_code=500)
