@@ -144,13 +144,22 @@ async def text_to_pdf(request: Request):
         pdf.set_font("DejaVu", size=10)
 
         for line in lines:
-            pdf.multi_cell(w=190, h=8, txt=line)  # << largura explícita evita quebra
+            pdf.multi_cell(w=190, h=8, txt=line)
 
-        pdf_bytes = pdf.output(dest='S').encode("latin1")
+        # CORREÇÃO: Tratamento adequado do output do FPDF
+        pdf_output = pdf.output(dest='S')
+        
+        # Converte para bytes se necessário
+        if isinstance(pdf_output, str):
+            pdf_bytes = pdf_output.encode('latin1')
+        elif isinstance(pdf_output, bytearray):
+            pdf_bytes = bytes(pdf_output)
+        else:
+            pdf_bytes = pdf_output
+        
         base64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
 
         return JSONResponse(content={"file_base64": base64_pdf, "filename": filename})
 
     except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
-
+        return JSONResponse(content={"error": str(e)}
