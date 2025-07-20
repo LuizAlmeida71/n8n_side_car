@@ -118,7 +118,15 @@ async def normaliza_pdf(request: Request):
 # if __name__ == "__main__":
 #     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
 
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fpdf import FPDF
+import base64
+
+app = FastAPI()
+
+# Caminho da fonte que suporta caracteres Unicode como “ç”, “ã”, “…” etc.
+FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
 @app.post("/text-to-pdf")
 async def text_to_pdf(request: Request):
@@ -130,12 +138,16 @@ async def text_to_pdf(request: Request):
         pdf = FPDF()
         pdf.add_page()
         pdf.set_auto_page_break(auto=True, margin=15)
-        pdf.set_font("Arial", size=12)
+
+        # Adiciona a fonte Unicode do sistema (DejaVu)
+        pdf.add_font("DejaVu", "", FONT_PATH, uni=True)
+        pdf.set_font("DejaVu", size=12)
 
         for line in text.split("\n"):
             pdf.multi_cell(0, 10, txt=line)
 
-        pdf_bytes = pdf.output(dest='S').encode('utf-8')
+        # Usa latin1 porque fpdf espera bytes compatíveis
+        pdf_bytes = pdf.output(dest='S').encode("latin1")
         base64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
 
         return JSONResponse(content={"file_base64": base64_pdf, "filename": filename})
