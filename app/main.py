@@ -123,7 +123,6 @@ from fastapi.responses import JSONResponse
 from fpdf import FPDF
 import base64
 
-app = FastAPI()
 
 # Caminho da fonte que suporta caracteres Unicode como “ç”, “ã”, “…” etc.
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
