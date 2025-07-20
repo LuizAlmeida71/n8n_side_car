@@ -135,7 +135,7 @@ async def text_to_pdf(request: Request):
         for line in text.split("\n"):
             pdf.multi_cell(0, 10, txt=line)
 
-        pdf_bytes = pdf.output(dest='S').encode('latin1')
+        pdf_bytes = pdf.output(dest='S').encode('utf-8')
         base64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
 
         return JSONResponse(content={"file_base64": base64_pdf, "filename": filename})
