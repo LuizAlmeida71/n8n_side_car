@@ -60,8 +60,10 @@ async def split_pdf(file: UploadFile = File(...)):
         for i in range(len(doc)):
             single_page = fitz.open()
             single_page.insert_pdf(doc, from_page=i, to_page=i)
+
+            # Corrigido: salvar com compactação e limpeza de objetos
             page_path = f"/tmp/page_{i+1}.pdf"
-            single_page.save(page_path)
+            single_page.save(page_path, garbage=4, deflate=True, incremental=False)
 
             with open(page_path, "rb") as f:
                 b64_content = base64.b64encode(f.read()).decode("utf-8")
