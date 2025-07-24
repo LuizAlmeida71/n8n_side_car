@@ -1,11 +1,12 @@
 from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.responses import JSONResponse
-from openpyxl import Workbook, load_workbook
+from openpyxl import Workbook, load_workbook, openpyxl
 import tempfile
 import fitz  # PyMuPDF
 import base64
 import os
 from fpdf import FPDF
+import traceback
 
 app = FastAPI()
 
@@ -165,3 +166,56 @@ async def text_to_pdf(request: Request):
 
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
+
+@app.post("/desfazer-merges")
+async def desfazer_merges(request: Request):
+    try:
+        # Recebe o corpo da requisição, que é uma lista de objetos {"row": [...]}
+        body = await request.json()
+
+        # Verifica se a entrada é uma lista e não está vazia
+        if not isinstance(body, list) or not body:
+            return JSONResponse(
+                content={"error": "A entrada deve ser uma lista de objetos não vazia."}, 
+                status_code=400
+            )
+
+        # Array para armazenar o resultado final com os merges desfeitos
+        output_data = []
+        
+        # Variável para armazenar a última linha completa vista.
+        # Inicializa com o número de colunas da primeira linha para garantir consistência.
+        num_colunas = len(body[0].get("row", []))
+        ultima_linha_completa = [None] * num_colunas
+
+        # Itera sobre cada item (linha) na entrada
+        for item in body:
+            linha_atual = item.get("row", [])
+            
+            # Garante que a linha tenha o número esperado de colunas, preenchendo com None se necessário
+            while len(linha_atual) < num_colunas:
+                linha_atual.append(None)
+            
+            nova_linha = []
+            
+            # Itera sobre cada célula da linha atual
+            for i in range(num_colunas):
+                # Se a célula atual não for nula, ela contém um novo valor.
+                # Atualizamos a "última linha completa" e usamos esse novo valor.
+                if linha_atual[i] is not None and str(linha_atual[i]).strip() != '':
+                    ultima_linha_completa[i] = linha_atual[i]
+                    nova_linha.append(linha_atual[i])
+                # Se a célula atual for nula, usamos o valor da "última linha completa" (preenchimento).
+                else:
+                    nova_linha.append(ultima_linha_completa[i])
+            
+            # Adiciona a linha processada ao output
+            output_data.append({"row": nova_linha})
+
+        return JSONResponse(content=output_data)
+
+    except Exception as e:
+        return JSONResponse(
+            content={"error": str(e), "trace": traceback.format_exc()}, 
+            status_code=500
+        )
