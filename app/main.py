@@ -168,6 +168,22 @@ async def text_to_pdf(request: Request):
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
+# Função auxiliar para verificar se um texto é um código de plantão válido
+def is_valid_shift_code(code):
+    if not code or not isinstance(code, str):
+        return False
+    # Códigos válidos devem conter letras além de apenas D, S, T, Q (dias da semana)
+    # E devem conter pelo menos uma letra que indique turno (M, T, N, D) ou tipo (CH, PJ, PSS)
+    code_upper = code.upper()
+    
+    # Se for apenas uma letra, só pode ser D, M, T, N
+    if len(code_upper.strip()) == 1:
+        return code_upper.strip() in ['D', 'M', 'T', 'N']
+        
+    # Verifica se contém siglas de turno ou tipo
+    return any(sub in code_upper for sub in ['M', 'T', 'N', 'D', 'CH', 'PJ', 'PSS'])
+
+
 @app.post("/normaliza-escala-json")
 async def normaliza_escala_json(request: Request):
     try:
@@ -181,7 +197,6 @@ async def normaliza_escala_json(request: Request):
         header_start_index = -1
         for i, item in enumerate(input_rows):
             row = item.get("row", [])
-            # Um cabeçalho válido tem "Nome Completo" e pelo menos um número (dia)
             if "Nome Completo" in row and any(isinstance(val, int) for val in row):
                 header_row = row
                 header_start_index = i
@@ -190,14 +205,15 @@ async def normaliza_escala_json(request: Request):
         if not header_row:
             return JSONResponse(content={"error": "Cabeçalho da escala não encontrado."}, status_code=400)
 
-        # --- ETAPA 2: Pré-processamento - Desfazer Merges (Forward Fill) ---
+        # --- ETAPA 2: Pré-processamento - Desfazer Merges ---
         unmerged_rows = []
         last_full_row = [None] * len(header_row)
         
-        # Processa apenas as linhas de dados após o cabeçalho
-        for item in input_rows[header_start_index + 1:]:
+        # Ignora a linha de dias da semana (Q, S, T, D) que fica logo após o cabeçalho
+        data_rows_start_index = header_start_index + 2 
+        
+        for item in input_rows[data_rows_start_index:]:
             current_row = item.get("row", [])
-            # Ignora linhas que são claramente separadores ou vazias
             if not any(current_row): continue
 
             processed_row = []
@@ -207,56 +223,60 @@ async def normaliza_escala_json(request: Request):
                     last_full_row[i] = cell_value
                     processed_row.append(cell_value)
                 else:
-                    processed_row.append(last_full_row[i])
+                    # Propaga apenas as 7 primeiras colunas (dados do profissional)
+                    if i < 7: 
+                        processed_row.append(last_full_row[i])
+                    else: # Mantém null para as colunas de plantão
+                        processed_row.append(cell_value)
             
             unmerged_rows.append(processed_row)
-
+            
         # --- ETAPA 3: Agrupar as linhas por nome de profissional ---
         profissionais_agrupados = defaultdict(list)
         for row in unmerged_rows:
-            nome = str(row[0] or '').replace('\n', ' ').strip()
-            if nome and "nome completo" not in nome.lower(): # Ignora a linha do cabeçalho caso passe
-                profissionais_agrupados[nome].append(row)
-        
+            nome_bruto = row[0]
+            if nome_bruto and isinstance(nome_bruto, str):
+                nome = nome_bruto.replace('\n', ' ').strip()
+                if nome:
+                    profissionais_agrupados[nome].append(row)
+
         # --- ETAPA 4: Consolidar os dados e formatar a saída ---
         lista_profissionais_final = []
         
         for nome, linhas_do_profissional in profissionais_agrupados.items():
-            # Pega as informações base da primeira linha (nome, cargo, crm)
             primeira_linha = linhas_do_profissional[0]
-            
-            # Coleta todos os vínculos únicos
             vinculos = list(set(str(linha[3] or '') for linha in linhas_do_profissional))
+            
+            # Q1: Estrutura agora é uma lista de turnos por dia
+            plantoes_mapeados = defaultdict(list)
 
-            # Q1: Mapear plantões como chave-valor (dia: plantão)
-            plantoes_mapeados = {}
-
-            # Itera em todas as linhas pertencentes ao profissional para coletar todos os plantões
             for linha_dados in linhas_do_profissional:
                 for i, header_col in enumerate(header_row):
-                    # Verifica se a coluna do cabeçalho é um dia (número)
                     if isinstance(header_col, int):
-                        dia = header_col
+                        dia = str(header_col)
                         plantao_code = linha_dados[i]
                         
-                        # Adiciona o plantão se a célula não for nula/vazia
-                        if plantao_code:
-                            plantoes_mapeados[str(dia)] = str(plantao_code).replace('\n', ' ')
+                        # Q2: Filtro para capturar apenas códigos de plantão válidos
+                        if is_valid_shift_code(plantao_code):
+                            # Adiciona à lista de plantões do dia, sem sobrescrever
+                            plantoes_mapeados[dia].append(str(plantao_code).replace('\n', ' ').strip())
 
-            # Só adiciona o profissional se ele tiver pelo menos um plantão
             if not plantoes_mapeados:
                 continue
+
+            # Remove duplicados de cada lista diária, caso haja
+            for dia in plantoes_mapeados:
+                plantoes_mapeados[dia] = list(set(plantoes_mapeados[dia]))
 
             profissional_final = {
                 "medico_nome": nome,
                 "cargo": str(primeira_linha[1] or '').strip(),
                 "crm": str(primeira_linha[6] or '').strip(),
-                "vinculos": [v.strip() for v in vinculos if v.strip()],
-                "plantoes": plantoes_mapeados
+                "vinculos": sorted([v.strip() for v in vinculos if v.strip()]),
+                "plantoes": dict(sorted(plantoes_mapeados.items(), key=lambda item: int(item[0])))
             }
             lista_profissionais_final.append(profissional_final)
 
-        # O ideal seria extrair unidade e mês/ano também, mas focando nas questões:
         return JSONResponse(content={"profissionais": lista_profissionais_final})
 
     except Exception as e:
