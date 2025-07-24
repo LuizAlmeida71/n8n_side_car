@@ -1,6 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.responses import JSONResponse
-from openpyxl import Workbook, load_workbook, openpyxl
+from openpyxl import Workbook, load_workbook
 import tempfile
 import fitz  # PyMuPDF
 import base64
