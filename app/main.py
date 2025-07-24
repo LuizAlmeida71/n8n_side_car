@@ -7,6 +7,7 @@ import base64
 import os
 from fpdf import FPDF
 import traceback
+from collections import defaultdict
 
 app = FastAPI()
 
@@ -167,55 +168,96 @@ async def text_to_pdf(request: Request):
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
-@app.post("/desfazer-merges")
-async def desfazer_merges(request: Request):
+@app.post("/normaliza-escala-json")
+async def normaliza_escala_json(request: Request):
     try:
-        # Recebe o corpo da requisição, que é uma lista de objetos {"row": [...]}
-        body = await request.json()
+        input_rows = await request.json()
 
-        # Verifica se a entrada é uma lista e não está vazia
-        if not isinstance(body, list) or not body:
-            return JSONResponse(
-                content={"error": "A entrada deve ser uma lista de objetos não vazia."}, 
-                status_code=400
-            )
+        if not isinstance(input_rows, list) or not input_rows:
+            return JSONResponse(content={"error": "A entrada deve ser uma lista de objetos 'row'."}, status_code=400)
 
-        # Array para armazenar o resultado final com os merges desfeitos
-        output_data = []
+        # --- ETAPA 1: Encontrar o cabeçalho com os dias do mês ---
+        header_row = None
+        header_start_index = -1
+        for i, item in enumerate(input_rows):
+            row = item.get("row", [])
+            # Um cabeçalho válido tem "Nome Completo" e pelo menos um número (dia)
+            if "Nome Completo" in row and any(isinstance(val, int) for val in row):
+                header_row = row
+                header_start_index = i
+                break
         
-        # Variável para armazenar a última linha completa vista.
-        # Inicializa com o número de colunas da primeira linha para garantir consistência.
-        num_colunas = len(body[0].get("row", []))
-        ultima_linha_completa = [None] * num_colunas
+        if not header_row:
+            return JSONResponse(content={"error": "Cabeçalho da escala não encontrado."}, status_code=400)
 
-        # Itera sobre cada item (linha) na entrada
-        for item in body:
-            linha_atual = item.get("row", [])
-            
-            # Garante que a linha tenha o número esperado de colunas, preenchendo com None se necessário
-            while len(linha_atual) < num_colunas:
-                linha_atual.append(None)
-            
-            nova_linha = []
-            
-            # Itera sobre cada célula da linha atual
-            for i in range(num_colunas):
-                # Se a célula atual não for nula, ela contém um novo valor.
-                # Atualizamos a "última linha completa" e usamos esse novo valor.
-                if linha_atual[i] is not None and str(linha_atual[i]).strip() != '':
-                    ultima_linha_completa[i] = linha_atual[i]
-                    nova_linha.append(linha_atual[i])
-                # Se a célula atual for nula, usamos o valor da "última linha completa" (preenchimento).
+        # --- ETAPA 2: Pré-processamento - Desfazer Merges (Forward Fill) ---
+        unmerged_rows = []
+        last_full_row = [None] * len(header_row)
+        
+        # Processa apenas as linhas de dados após o cabeçalho
+        for item in input_rows[header_start_index + 1:]:
+            current_row = item.get("row", [])
+            # Ignora linhas que são claramente separadores ou vazias
+            if not any(current_row): continue
+
+            processed_row = []
+            for i in range(len(header_row)):
+                cell_value = current_row[i] if i < len(current_row) else None
+                if cell_value is not None and str(cell_value).strip() != '':
+                    last_full_row[i] = cell_value
+                    processed_row.append(cell_value)
                 else:
-                    nova_linha.append(ultima_linha_completa[i])
+                    processed_row.append(last_full_row[i])
             
-            # Adiciona a linha processada ao output
-            output_data.append({"row": nova_linha})
+            unmerged_rows.append(processed_row)
 
-        return JSONResponse(content=output_data)
+        # --- ETAPA 3: Agrupar as linhas por nome de profissional ---
+        profissionais_agrupados = defaultdict(list)
+        for row in unmerged_rows:
+            nome = str(row[0] or '').replace('\n', ' ').strip()
+            if nome and "nome completo" not in nome.lower(): # Ignora a linha do cabeçalho caso passe
+                profissionais_agrupados[nome].append(row)
+        
+        # --- ETAPA 4: Consolidar os dados e formatar a saída ---
+        lista_profissionais_final = []
+        
+        for nome, linhas_do_profissional in profissionais_agrupados.items():
+            # Pega as informações base da primeira linha (nome, cargo, crm)
+            primeira_linha = linhas_do_profissional[0]
+            
+            # Coleta todos os vínculos únicos
+            vinculos = list(set(str(linha[3] or '') for linha in linhas_do_profissional))
+
+            # Q1: Mapear plantões como chave-valor (dia: plantão)
+            plantoes_mapeados = {}
+
+            # Itera em todas as linhas pertencentes ao profissional para coletar todos os plantões
+            for linha_dados in linhas_do_profissional:
+                for i, header_col in enumerate(header_row):
+                    # Verifica se a coluna do cabeçalho é um dia (número)
+                    if isinstance(header_col, int):
+                        dia = header_col
+                        plantao_code = linha_dados[i]
+                        
+                        # Adiciona o plantão se a célula não for nula/vazia
+                        if plantao_code:
+                            plantoes_mapeados[str(dia)] = str(plantao_code).replace('\n', ' ')
+
+            # Só adiciona o profissional se ele tiver pelo menos um plantão
+            if not plantoes_mapeados:
+                continue
+
+            profissional_final = {
+                "medico_nome": nome,
+                "cargo": str(primeira_linha[1] or '').strip(),
+                "crm": str(primeira_linha[6] or '').strip(),
+                "vinculos": [v.strip() for v in vinculos if v.strip()],
+                "plantoes": plantoes_mapeados
+            }
+            lista_profissionais_final.append(profissional_final)
+
+        # O ideal seria extrair unidade e mês/ano também, mas focando nas questões:
+        return JSONResponse(content={"profissionais": lista_profissionais_final})
 
     except Exception as e:
-        return JSONResponse(
-            content={"error": str(e), "trace": traceback.format_exc()}, 
-            status_code=500
-        )
+        return JSONResponse(content={"error": str(e), "trace": traceback.format_exc()}, status_code=500)
