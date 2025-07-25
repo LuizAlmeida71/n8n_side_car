@@ -170,116 +170,215 @@ async def text_to_pdf(request: Request):
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
-# Função auxiliar para verificar se um texto é um código de plantão válido
-def is_valid_shift_code(code):
-    if not code or not isinstance(code, str):
-        return False
-    # Códigos válidos devem conter letras além de apenas D, S, T, Q (dias da semana)
-    # E devem conter pelo menos uma letra que indique turno (M, T, N, D) ou tipo (CH, PJ, PSS)
-    code_upper = code.upper()
-    
-    # Se for apenas uma letra, só pode ser D, M, T, N
-    if len(code_upper.strip()) == 1:
-        return code_upper.strip() in ['D', 'M', 'T', 'N']
-        
-    # Verifica se contém siglas de turno ou tipo
-    return any(sub in code_upper for sub in ['M', 'T', 'N', 'D', 'CH', 'PJ', 'PSS'])
 
+# --- Início normaliza-escala-json ---
+# --- CONFIGURAÇÕES E MAPEAMENTOS GLOBAIS ---
+
+MONTH_MAP = {
+    'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 
+    'MAIO': 5, 'JUNHO': 6, 'JULHO': 7, 'AGOSTO': 8, 
+    'SETEMBRO': 9, 'OUTUBRO': 10, 'NOVEMBRO': 11, 'DEZEMBRO': 12
+}
+
+# Definição dos horários padrão para cada turno
+HORARIOS_TURNO = {
+    "MANHÃ": {"inicio": "07:00", "fim": "13:00"},
+    "TARDE": {"inicio": "13:00", "fim": "19:00"},
+    "NOITE": {"inicio": "19:00", "fim": "07:00"},
+    "NOITE (início)": {"inicio": "19:00", "fim": "01:00"},
+    "NOITE (fim)": {"inicio": "01:00", "fim": "07:00"}
+}
+
+# Lista de setores que têm "noite completa" (19h às 07h)
+SETORES_NOITE_COMPLETA = ["UTI", "TERAPIA INTENSIVA"] 
+
+# --- FUNÇÕES AUXILIARES ---
+
+def parse_mes_ano(text):
+    match = re.search(r'([A-ZÇÃ]+)[\s/]*(\d{4})', text.upper())
+    if not match: return None, None
+    mes_nome, ano_str = match.groups()
+    mes = MONTH_MAP.get(mes_nome)
+    ano = int(ano_str)
+    return mes, ano
+
+def interpretar_turno(token, medico_setor):
+    if not token or not isinstance(token, str):
+        return []
+
+    # Normaliza o token
+    token_upper = token.upper().replace('\n', '').replace('/', '').replace(' ', '')
+    
+    # 10.1.1: Trata casos especiais como N1N2
+    if "N1N2" in token_upper:
+        return [{"turno": "NOITE"}]
+
+    # 10.1.2: Expande siglas compostas
+    tokens = []
+    if "MTN" in token_upper: tokens.extend(["M", "T", "N"])
+    elif "DN" in token_upper: tokens.extend(["D", "N"])
+    else:
+        # Pega todas as letras M, T, N, D do token
+        found_tokens = re.findall(r'[MTND]', token_upper)
+        tokens.extend(list(dict.fromkeys(found_tokens))) # Remove duplicados
+    
+    # Se não encontrou tokens, retorna vazio
+    if not tokens: return []
+    
+    # 10.1.3: Converte os tokens
+    turnos_finais = []
+    for t in tokens:
+        if t == 'M': turnos_finais.append({"turno": "MANHÃ"})
+        elif t == 'T': turnos_finais.append({"turno": "TARDE"})
+        elif t == 'D': 
+            turnos_finais.append({"turno": "MANHÃ"})
+            turnos_finais.append({"turno": "TARDE"})
+        elif t == 'N':
+            # Verifica se o setor exige noite completa
+            if any(s in medico_setor.upper() for s in SETORES_NOITE_COMPLETA):
+                turnos_finais.append({"turno": "NOITE"})
+            else:
+                turnos_finais.append({"turno": "NOITE (início)"})
+                turnos_finais.append({"turno": "NOITE (fim)"})
+
+    return turnos_finais
+
+# --- ENDPOINT PRINCIPAL ---
 
 @app.post("/normaliza-escala-json")
 async def normaliza_escala_json(request: Request):
     try:
-        input_rows = await request.json()
+        input_data = await request.json()
+        
+        all_scales = []
+        current_scale_data = []
 
-        if not isinstance(input_rows, list) or not input_rows:
-            return JSONResponse(content={"error": "A entrada deve ser uma lista de objetos 'row'."}, status_code=400)
-
-        # --- ETAPA 1: Encontrar o cabeçalho com os dias do mês ---
-        header_row = None
-        header_start_index = -1
-        for i, item in enumerate(input_rows):
+        # Separa o documento em blocos de escalas
+        for item in input_data:
             row = item.get("row", [])
-            if "Nome Completo" in row and any(isinstance(val, int) for val in row):
-                header_row = row
-                header_start_index = i
-                break
-        
-        if not header_row:
-            return JSONResponse(content={"error": "Cabeçalho da escala não encontrado."}, status_code=400)
-
-        # --- ETAPA 2: Pré-processamento - Desfazer Merges ---
-        unmerged_rows = []
-        last_full_row = [None] * len(header_row)
-        
-        # Ignora a linha de dias da semana (Q, S, T, D) que fica logo após o cabeçalho
-        data_rows_start_index = header_start_index + 2 
-        
-        for item in input_rows[data_rows_start_index:]:
-            current_row = item.get("row", [])
-            if not any(current_row): continue
-
-            processed_row = []
-            for i in range(len(header_row)):
-                cell_value = current_row[i] if i < len(current_row) else None
-                if cell_value is not None and str(cell_value).strip() != '':
-                    last_full_row[i] = cell_value
-                    processed_row.append(cell_value)
-                else:
-                    # Propaga apenas as 7 primeiras colunas (dados do profissional)
-                    if i < 7: 
-                        processed_row.append(last_full_row[i])
-                    else: # Mantém null para as colunas de plantão
-                        processed_row.append(cell_value)
+            row_text = ' '.join(str(c or '').strip() for c in row).upper()
             
-            unmerged_rows.append(processed_row)
+            # Detecta o início de uma nova escala
+            if 'UNIDADE:' in row_text or 'UNIDADE SETOR:' in row_text:
+                if current_scale_data:
+                    all_scales.append(current_scale_data)
+                current_scale_data = []
             
-        # --- ETAPA 3: Agrupar as linhas por nome de profissional ---
-        profissionais_agrupados = defaultdict(list)
-        for row in unmerged_rows:
-            nome_bruto = row[0]
-            if nome_bruto and isinstance(nome_bruto, str):
-                nome = nome_bruto.replace('\n', ' ').strip()
+            current_scale_data.append(row)
+        
+        if current_scale_data:
+            all_scales.append(current_scale_data)
+            
+        # Processa cada bloco de escala
+        final_output = []
+        for scale_block in all_scales:
+            unidade, setor, mes, ano = "NÃO INFORMADO", "NÃO INFORMADO", None, None
+            header_row, header_index = None, -1
+
+            # 1. Extrai metadados e localiza o cabeçalho
+            for i, row in enumerate(scale_block):
+                row_text = ' '.join(str(c or '').strip() for c in row).upper()
+                if 'UNIDADE:' in row_text:
+                    unidade = re.split(r'UNIDADE:', row_text, flags=re.IGNORECASE)[1].split('ESCALA DE SERVIÇO:')[0].strip()
+                if 'UNIDADE SETOR:' in row_text:
+                    setor = re.split(r'UNIDADE SETOR:', row_text, flags=re.IGNORECASE)[1].strip()
+                if 'MÊS:' in row_text:
+                    mes, ano = parse_mes_ano(row_text)
+                
+                if "NOME COMPLETO" in row and any(isinstance(c, int) for c in row):
+                    header_row = row
+                    header_index = i
+
+            if not header_row or mes is None:
+                continue # Pula blocos que não são escalas válidas
+
+            # Mapeia a posição do dia para seu índice na linha
+            day_to_col_index = {day: i for i, day in enumerate(header_row) if isinstance(day, int)}
+
+            # 2. Processa as linhas de dados (após o cabeçalho)
+            profissionais_data = defaultdict(lambda: {
+                "info": {}, "plantoes_brutos": defaultdict(list)
+            })
+            
+            last_professional_name = None
+            
+            for row in scale_block[header_index + 1:]:
+                # Ignora linhas de dias da semana, vazias ou de notas
+                if not row or len(row) < 3 or all(v is None for v in row) or "informamos que" in str(row[0]).lower():
+                    continue
+
+                # Flexibiliza a posição do nome
+                nome = None
+                if isinstance(row[0], str) and len(row[0].split()) > 1:
+                    nome = row[0].replace('\n', ' ').strip()
+                elif len(row) > 1 and isinstance(row[1], str) and len(row[1].split()) > 1:
+                    nome = row[1].replace('\n', ' ').strip()
+
                 if nome:
-                    profissionais_agrupados[nome].append(row)
+                    last_professional_name = nome
 
-        # --- ETAPA 4: Consolidar os dados e formatar a saída ---
-        lista_profissionais_final = []
-        
-        for nome, linhas_do_profissional in profissionais_agrupados.items():
-            primeira_linha = linhas_do_profissional[0]
-            vinculos = list(set(str(linha[3] or '') for linha in linhas_do_profissional))
-            
-            # Q1: Estrutura agora é uma lista de turnos por dia
-            plantoes_mapeados = defaultdict(list)
+                if not last_professional_name: continue
+                
+                # Coleta informações se ainda não tiver
+                if not profissionais_data[last_professional_name]["info"]:
+                    profissionais_data[last_professional_name]["info"] = {
+                        "medico_nome": last_professional_name,
+                        "cargo": str(row[1] or '').strip() if len(row) > 1 else '',
+                        "matricula": str(row[2] or '').strip() if len(row) > 2 else '',
+                        "vinculo": str(row[3] or '').strip() if len(row) > 3 else '',
+                        "crm": str(row[6] or '').strip() if len(row) > 6 else ''
+                    }
 
-            for linha_dados in linhas_do_profissional:
-                for i, header_col in enumerate(header_row):
-                    if isinstance(header_col, int):
-                        dia = str(header_col)
-                        plantao_code = linha_dados[i]
-                        
-                        # Q2: Filtro para capturar apenas códigos de plantão válidos
-                        if is_valid_shift_code(plantao_code):
-                            # Adiciona à lista de plantões do dia, sem sobrescrever
-                            plantoes_mapeados[dia].append(str(plantao_code).replace('\n', ' ').strip())
+                # Coleta os plantões brutos
+                for day, col_index in day_to_col_index.items():
+                    if col_index < len(row) and row[col_index]:
+                        profissionais_data[last_professional_name]["plantoes_brutos"][day].append(str(row[col_index]))
 
-            if not plantoes_mapeados:
-                continue
+            # 3. Monta a saída final para a escala
+            lista_profissionais_final = []
+            for nome, data in profissionais_data.items():
+                if not data["plantoes_brutos"]: continue
 
-            # Remove duplicados de cada lista diária, caso haja
-            for dia in plantoes_mapeados:
-                plantoes_mapeados[dia] = list(set(plantoes_mapeados[dia]))
+                profissional_obj = {
+                    "medico_nome": nome,
+                    "medico_crm": data["info"]["crm"],
+                    "medico_especialidade": data["info"]["cargo"],
+                    "medico_vinculo": data["info"]["vinculo"],
+                    "medico_setor": setor,
+                    "plantoes": []
+                }
+                
+                for dia, tokens in sorted(data["plantoes_brutos"].items()):
+                    for token in set(tokens): # Usa set para evitar duplicados
+                        turnos_interpretados = interpretar_turno(token, setor)
+                        for turno_info in turnos_interpretados:
+                            data_plantao = datetime(ano, mes, dia)
+                            # 10.2: Incrementa a data para NOITE (fim)
+                            if turno_info["turno"] == "NOITE (fim)":
+                                data_plantao += timedelta(days=1)
+                            
+                            horarios = HORARIOS_TURNO[turno_info["turno"]]
 
-            profissional_final = {
-                "medico_nome": nome,
-                "cargo": str(primeira_linha[1] or '').strip(),
-                "crm": str(primeira_linha[6] or '').strip(),
-                "vinculos": sorted([v.strip() for v in vinculos if v.strip()]),
-                "plantoes": dict(sorted(plantoes_mapeados.items(), key=lambda item: int(item[0])))
-            }
-            lista_profissionais_final.append(profissional_final)
+                            profissional_obj["plantoes"].append({
+                                "dia": dia,
+                                "data": data_plantao.strftime('%d/%m/%Y'),
+                                "turno": turno_info["turno"],
+                                "inicio": horarios["inicio"],
+                                "fim": horarios["fim"]
+                            })
+                
+                # Ordena os plantões
+                profissional_obj["plantoes"].sort(key=lambda p: (p["dia"], p["inicio"]))
+                lista_profissionais_final.append(profissional_obj)
 
-        return JSONResponse(content={"profissionais": lista_profissionais_final})
+            if lista_profissionais_final:
+                final_output.append({
+                    "unidade_escala": unidade,
+                    "mes_ano_escala": f"{list(MONTH_MAP.keys())[mes-1]}/{ano}",
+                    "profissionais": lista_profissionais_final
+                })
+
+        return JSONResponse(content=final_output)
 
     except Exception as e:
         return JSONResponse(content={"error": str(e), "trace": traceback.format_exc()}, status_code=500)
