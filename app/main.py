@@ -83,42 +83,191 @@ async def split_pdf(file: UploadFile = File(...)):
 
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
+        
 
+# --- INÍCIO normaliza-escala-PDF ---
 
-@app.post("/normaliza-pdf")
-async def normaliza_pdf(request: Request):
+# --- CONFIGURAÇÕES E MAPEAMENTOS GLOBAIS ---
+MONTH_MAP = {
+    'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
+    'JUNHO': 6, 'JULHO': 7, 'AGOSTO': 8, 'SETEMBRO': 9, 'OUTUBRO': 10,
+    'NOVEMBRO': 11, 'DEZEMBRO': 12
+}
+HORARIOS_TURNO = {
+    "MANHÃ": {"inicio": "07:00", "fim": "13:00"}, "TARDE": {"inicio": "13:00", "fim": "19:00"},
+    "NOITE": {"inicio": "19:00", "fim": "07:00"}, "NOITE (início)": {"inicio": "19:00", "fim": "01:00"},
+    "NOITE (fim)": {"inicio": "01:00", "fim": "07:00"}
+}
+SETORES_NOITE_COMPLETA = ["UTI", "TERAPIA INTENSIVA"]
+
+# --- FUNÇÕES AUXILIARES ---
+
+def parse_mes_ano(text):
+    match = re.search(r'MÊS:\s*([A-ZÇÃ]+)[\s/]*(\d{4})', text.upper())
+    if not match: return None, None
+    mes_nome, ano_str = match.groups()
+    mes = MONTH_MAP.get(mes_nome)
+    ano = int(ano_str)
+    return mes, ano
+
+def interpretar_turno(token, medico_setor):
+    if not token or not isinstance(token, str): return []
+    token_upper = token.upper().replace('\n', '').replace('/', '').replace(' ', '')
+    
+    if "N1N2" in token_upper: return [{"turno": "NOITE"}]
+    
+    tokens = []
+    if "MTN" in token_upper: tokens.extend(["M", "T", "N"])
+    elif "DN" in token_upper: tokens.extend(["D", "N"])
+    else:
+        found_tokens = re.findall(r'[MTNDC]', token_upper)
+        tokens.extend(list(dict.fromkeys(found_tokens)))
+    
+    if not tokens: return []
+    
+    turnos_finais = []
+    for t in tokens:
+        if t == 'M': turnos_finais.append({"turno": "MANHÃ"})
+        elif t == 'T': turnos_finais.append({"turno": "TARDE"})
+        elif t == 'D': 
+            turnos_finais.append({"turno": "MANHÃ"})
+            turnos_finais.append({"turno": "TARDE"})
+        elif t in ['N', 'C']:
+            if any(s in medico_setor.upper() for s in SETORES_NOITE_COMPLETA):
+                turnos_finais.append({"turno": "NOITE"})
+            else:
+                turnos_finais.append({"turno": "NOITE (início)"})
+                turnos_finais.append({"turno": "NOITE (fim)"})
+    return turnos_finais
+
+def is_valid_professional_row(row, nome_idx):
+    if not row or nome_idx >= len(row): return False
+    name = row[nome_idx]
+    if not name or not isinstance(name, str): return False
+    name_upper = name.strip().upper()
+    ignored = ["NOME COMPLETO", "LEGENDA", "* INFORMA", "CAPACITAÇÃO", "PROCESSO"]
+    return all(keyword not in name_upper for keyword in ignored) and len(name.split()) > 1
+
+# --- ENDPOINT PRINCIPAL (PDF DIRETO) ---
+
+@app.post("/normaliza-escala-from-pdf")
+async def normaliza_escala_from_pdf(request: Request):
     try:
         body = await request.json()
-        textos_por_pagina = []
+        
+        # 1. Extrai tabelas e texto de todas as páginas PDF
+        all_rows = []
+        full_text = ""
+        for page_data in body:
+            b64_data = page_data.get("bae64") # Corrigido para "bae64" como no seu input
+            if not b64_data: continue
+            
+            pdf_bytes = base64.b64decode(b64_data)
+            with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+                page = doc[0]
+                full_text += page.get_text() + "\n"
+                tables = page.find_tables()
+                for table in tables:
+                    all_rows.extend(table.extract())
 
-        for page in body.get("pages", []):
-            file_data = base64.b64decode(page["file_base64"])
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
-                tmp_pdf.write(file_data)
-                tmp_pdf_path = tmp_pdf.name
+        # 2. Extrai metadados do texto completo
+        unidade_match = re.search(r'UNIDADE:\s*(.*)', full_text, re.IGNORECASE)
+        setor_match = re.search(r'UNIDADE SETOR:\s*(.*)', full_text, re.IGNORECASE)
+        mes, ano = parse_mes_ano(full_text)
+        
+        unidade = unidade_match.group(1).strip() if unidade_match else "NÃO INFORMADO"
+        setor = setor_match.group(1).strip() if setor_match else "NÃO INFORMADO"
+        
+        if not all_rows or not mes:
+             return JSONResponse(content={"error": "Nenhuma tabela ou data válida encontrada."}, status_code=400)
 
-            with fitz.open(tmp_pdf_path) as doc:
-                texto = doc[0].get_text()
-                textos_por_pagina.append(texto)
+        # 3. Localiza o cabeçalho e cria o mapa de colunas
+        header_row, col_map = None, {}
+        for row in all_rows:
+            if row and "NOME COMPLETO" in str(row[0]):
+                header_row = row
+                for idx, col_name in enumerate(row):
+                    if col_name: col_map[col_name.replace('\n', ' ')] = idx
+                if "CONSELHO DE CLASSE" in col_map: col_map["CRM"] = col_map["CONSELHO DE CLASSE"]
+                break
+        
+        if not header_row:
+            return JSONResponse(content={"error": "Cabeçalho da escala não encontrado nas tabelas."}, status_code=400)
+        
+        # 4. Processa as linhas e agrupa por profissional
+        profissionais_data = defaultdict(lambda: {"info": {}, "plantoes_brutos": defaultdict(list)})
+        last_professional_name = None
+        nome_idx = col_map.get("NOME COMPLETO", 0)
 
-        texto_completo = "\n".join(textos_por_pagina)
+        for row in all_rows:
+            if is_valid_professional_row(row, nome_idx):
+                last_professional_name = row[nome_idx].replace('\n', ' ').strip()
+            
+            if not last_professional_name: continue
 
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "Escala"
-        ws.append(["Página", "Conteúdo"])
-        for i, texto in enumerate(textos_por_pagina, 1):
-            ws.append([i, texto.strip()])
+            # Coleta as informações do profissional (sem propagar CRM indevidamente)
+            info = profissionais_data[last_professional_name]["info"]
+            if not info: # Pega as informações da primeira vez que o nome aparece
+                info["medico_nome"] = last_professional_name
+                info["cargo"] = row[col_map.get("CARGO")] if col_map.get("CARGO") and col_map.get("CARGO") < len(row) else "N/I"
+                info["vinculo"] = row[col_map.get("VÍNCULO")] if col_map.get("VÍNCULO") and col_map.get("VÍNCULO") < len(row) else "N/I"
+                crm_val = row[col_map.get("CRM")] if col_map.get("CRM") and col_map.get("CRM") < len(row) else None
+                info["crm"] = str(crm_val).strip() if crm_val else "N/I"
 
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp_xlsx:
-            wb.save(tmp_xlsx.name)
-            tmp_xlsx.seek(0)
-            b64_xlsx = base64.b64encode(tmp_xlsx.read()).decode("utf-8")
+            # Coleta os plantões da linha atual
+            for dia_str, col_idx in col_map.items():
+                try:
+                    dia = int(dia_str)
+                    if col_idx < len(row) and row[col_idx]:
+                        profissionais_data[last_professional_name]["plantoes_brutos"][dia].append(str(row[col_idx]))
+                except (ValueError, TypeError):
+                    continue # Ignora cabeçalhos que não são números de dia
 
-        return JSONResponse(content={"file_base64": b64_xlsx, "filename": "escala_normalizada.xlsx"})
+        # 5. Monta o JSON de saída final com a lógica de turnos
+        lista_profissionais_final = []
+        for nome, data in profissionais_data.items():
+            if not data["plantoes_brutos"]: continue
+            
+            profissional_obj = {
+                "medico_nome": nome,
+                "medico_crm": data["info"]["crm"],
+                "medico_especialidade": data["info"]["cargo"],
+                "medico_vinculo": data["info"]["vinculo"],
+                "medico_setor": setor,
+                "plantoes": []
+            }
+
+            for dia, tokens in sorted(data["plantoes_brutos"].items()):
+                for token in set(tokens):
+                    turnos = interpretar_turno(token, setor)
+                    for turno_info in turnos:
+                        data_plantao = datetime(ano, mes, dia)
+                        if turno_info["turno"] == "NOITE (fim)":
+                            data_plantao += timedelta(days=1)
+                        
+                        horarios = HORARIOS_TURNO.get(turno_info["turno"], {})
+                        profissional_obj["plantoes"].append({
+                            "dia": dia, "data": data_plantao.strftime('%d/%m/%Y'),
+                            "turno": turno_info["turno"], "inicio": horarios.get("inicio"), "fim": horarios.get("fim")
+                        })
+            
+            if profissional_obj["plantoes"]:
+                profissional_obj["plantoes"].sort(key=lambda p: (p["dia"], p["inicio"] or ""))
+                lista_profissionais_final.append(profissional_obj)
+
+        mes_nome_str = list(MONTH_MAP.keys())[list(MONTH_MAP.values()).index(mes)]
+        final_output = [{
+            "unidade_escala": unidade,
+            "mes_ano_escala": f"{mes_nome_str}/{ano}",
+            "profissionais": lista_profissionais_final
+        }]
+        
+        return JSONResponse(content=final_output)
 
     except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+        return JSONResponse(content={"error": str(e), "trace": traceback.format_exc()}, status_code=500)
+
+# --- FIM normaliza-escala-PDF ---
 
 
 from fastapi import Request
