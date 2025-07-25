@@ -175,7 +175,7 @@ async def normaliza_escala_from_pdf(request: Request):
                 page = doc[0]
                 tables = page.find_tables()
                 for table in tables:
-                    headers = table.header.get_headers()
+                    headers = table.header.names
                     if headers and any("NOME COMPLETO" in str(h) for h in headers):
                         all_table_rows.extend(table.extract())
                         break
