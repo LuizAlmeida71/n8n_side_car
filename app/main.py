@@ -103,7 +103,7 @@ SETORES_NOITE_COMPLETA = ["UTI", "TERAPIA INTENSIVA"]
 # --- FUNÇÕES AUXILIARES ---
 
 def parse_mes_ano(text):
-    match = re.search(r'MÊS:\s*([A-ZÇÃ]+)[\s/]*(\d{4})', text.upper())
+    match = re.search(r'MÊS[\s/:]*([A-ZÇÃ]+)[\s/]*(\d{4})', text.upper())
     if not match: return None, None
     mes_nome, ano_str = match.groups()
     mes = MONTH_MAP.get(mes_nome)
@@ -116,37 +116,28 @@ def interpretar_turno(token, medico_setor):
     
     if "N1N2" in token_upper: return [{"turno": "NOITE"}]
     
-    tokens = []
-    if "MTN" in token_upper: tokens.extend(["M", "T", "N"])
-    elif "DN" in token_upper: tokens.extend(["D", "N"])
-    else:
-        found_tokens = re.findall(r'[MTNDC]', token_upper)
-        tokens.extend(list(dict.fromkeys(found_tokens)))
-    
-    if not tokens: return []
-    
-    turnos_finais = []
-    for t in tokens:
-        if t == 'M': turnos_finais.append({"turno": "MANHÃ"})
-        elif t == 'T': turnos_finais.append({"turno": "TARDE"})
-        elif t == 'D': 
-            turnos_finais.append({"turno": "MANHÃ"})
-            turnos_finais.append({"turno": "TARDE"})
-        elif t in ['N', 'C']:
-            if any(s in medico_setor.upper() for s in SETORES_NOITE_COMPLETA):
-                turnos_finais.append({"turno": "NOITE"})
-            else:
-                turnos_finais.append({"turno": "NOITE (início)"})
-                turnos_finais.append({"turno": "NOITE (fim)"})
-    return turnos_finais
+    # Expande siglas como MTN, DN
+    expanded = []
+    if "MTN" in token_upper: expanded.extend(["M", "T", "N"])
+    elif "DN" in token_upper: expanded.extend(["D", "N"])
+    else: expanded.append(token_upper)
 
-def is_valid_professional_row(row, nome_idx):
-    if not row or nome_idx >= len(row): return False
-    name = row[nome_idx]
-    if not name or not isinstance(name, str): return False
-    name_upper = name.strip().upper()
-    ignored = ["NOME COMPLETO", "LEGENDA", "* INFORMA", "CAPACITAÇÃO", "PROCESSO"]
-    return all(keyword not in name_upper for keyword in ignored) and len(name.split()) > 1
+    turnos_finais = []
+    for sub_token in expanded:
+        found_tokens = re.findall(r'[MTNDC]', sub_token)
+        for t in list(dict.fromkeys(found_tokens)): # Remove duplicados
+            if t == 'M': turnos_finais.append({"turno": "MANHÃ"})
+            elif t == 'T': turnos_finais.append({"turno": "TARDE"})
+            elif t == 'D': 
+                turnos_finais.append({"turno": "MANHÃ"})
+                turnos_finais.append({"turno": "TARDE"})
+            elif t in ['N', 'C']:
+                if any(s in medico_setor.upper() for s in SETORES_NOITE_COMPLETA):
+                    turnos_finais.append({"turno": "NOITE"})
+                else:
+                    turnos_finais.append({"turno": "NOITE (início)"})
+                    turnos_finais.append({"turno": "NOITE (fim)"})
+    return turnos_finais
 
 # --- ENDPOINT PRINCIPAL (PDF DIRETO) ---
 
@@ -155,96 +146,97 @@ async def normaliza_escala_from_pdf(request: Request):
     try:
         body = await request.json()
         
-        # 1. Extrai tabelas e texto de todas as páginas PDF
-        all_rows = []
+        # 1. Concatena o texto de todas as páginas para extração de metadados globais
         full_text = ""
         for page_data in body:
-            b64_data = page_data.get("bae64") # Corrigido para "bae64" como no seu input
+            b64_data = page_data.get("bae64")
             if not b64_data: continue
-            
             pdf_bytes = base64.b64decode(b64_data)
             with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
-                page = doc[0]
-                full_text += page.get_text() + "\n"
-                tables = page.find_tables()
-                for table in tables:
-                    all_rows.extend(table.extract())
+                full_text += doc[0].get_text() + "\n"
 
-        # 2. Extrai metadados do texto completo
-        unidade_match = re.search(r'UNIDADE:\s*(.*)', full_text, re.IGNORECASE)
-        setor_match = re.search(r'UNIDADE SETOR:\s*(.*)', full_text, re.IGNORECASE)
+        unidade_match = re.search(r'UNIDADE:\s*(.*?)\n', full_text, re.IGNORECASE)
+        setor_match = re.search(r'UNIDADE SETOR:\s*(.*?)\n', full_text, re.IGNORECASE)
         mes, ano = parse_mes_ano(full_text)
         
         unidade = unidade_match.group(1).strip() if unidade_match else "NÃO INFORMADO"
         setor = setor_match.group(1).strip() if setor_match else "NÃO INFORMADO"
         
-        if not all_rows or not mes:
-             return JSONResponse(content={"error": "Nenhuma tabela ou data válida encontrada."}, status_code=400)
+        if mes is None or ano is None:
+            return JSONResponse(content={"error": "Não foi possível extrair Mês/Ano do documento."}, status_code=400)
 
-        # 3. Localiza o cabeçalho e cria o mapa de colunas
-        header_row, col_map = None, {}
-        for row in all_rows:
-            if row and "NOME COMPLETO" in str(row[0]):
-                header_row = row
-                for idx, col_name in enumerate(row):
-                    if col_name: col_map[col_name.replace('\n', ' ')] = idx
-                if "CONSELHO DE CLASSE" in col_map: col_map["CRM"] = col_map["CONSELHO DE CLASSE"]
-                break
-        
-        if not header_row:
-            return JSONResponse(content={"error": "Cabeçalho da escala não encontrado nas tabelas."}, status_code=400)
-        
-        # 4. Processa as linhas e agrupa por profissional
-        profissionais_data = defaultdict(lambda: {"info": {}, "plantoes_brutos": defaultdict(list)})
+        # 2. Extrai as linhas da tabela principal de cada página
+        all_table_rows = []
+        for page_data in body:
+            b64_data = page_data.get("bae64")
+            if not b64_data: continue
+            pdf_bytes = base64.b64decode(b64_data)
+            with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+                page = doc[0]
+                tables = page.find_tables()
+                for table in tables:
+                    headers = table.header.get_headers()
+                    if headers and any("NOME COMPLETO" in str(h) for h in headers):
+                        all_table_rows.extend(table.extract())
+                        break
+
+        if not all_table_rows:
+            return JSONResponse(content={"error": "Nenhuma tabela de escala principal encontrada."}, status_code=400)
+            
+        header_row = all_table_rows[0]
+        col_map = {str(name).replace('\n', ' '): i for i, name in enumerate(header_row) if name}
+        if "CONSELHO DE CLASSE" in col_map: col_map["CRM"] = col_map["CONSELHO DE CLASSE"]
+            
+        # 3. Agrupa linhas por profissional
+        profissionais_raw_data = defaultdict(list)
         last_professional_name = None
-        nome_idx = col_map.get("NOME COMPLETO", 0)
+        nome_idx = col_map.get("NOME COMPLETO")
 
-        for row in all_rows:
-            if is_valid_professional_row(row, nome_idx):
-                last_professional_name = row[nome_idx].replace('\n', ' ').strip()
+        for row in all_table_rows[1:]:
+            if not any(v for v in row if v is not None and str(v).strip() != ''): continue
             
-            if not last_professional_name: continue
+            nome_bruto = row[nome_idx] if nome_idx is not None and nome_idx < len(row) and row[nome_idx] else None
+            if nome_bruto and len(nome_bruto.strip()) > 3 and "NOME COMPLETO" not in nome_bruto.upper():
+                last_professional_name = nome_bruto.replace('\n', ' ').strip()
+            
+            if last_professional_name:
+                profissionais_raw_data[last_professional_name].append(row)
 
-            # Coleta as informações do profissional (sem propagar CRM indevidamente)
-            info = profissionais_data[last_professional_name]["info"]
-            if not info: # Pega as informações da primeira vez que o nome aparece
-                info["medico_nome"] = last_professional_name
-                info["cargo"] = row[col_map.get("CARGO")] if col_map.get("CARGO") and col_map.get("CARGO") < len(row) else "N/I"
-                info["vinculo"] = row[col_map.get("VÍNCULO")] if col_map.get("VÍNCULO") and col_map.get("VÍNCULO") < len(row) else "N/I"
-                crm_val = row[col_map.get("CRM")] if col_map.get("CRM") and col_map.get("CRM") < len(row) else None
-                info["crm"] = str(crm_val).strip() if crm_val else "N/I"
-
-            # Coleta os plantões da linha atual
-            for dia_str, col_idx in col_map.items():
-                try:
-                    dia = int(dia_str)
-                    if col_idx < len(row) and row[col_idx]:
-                        profissionais_data[last_professional_name]["plantoes_brutos"][dia].append(str(row[col_idx]))
-                except (ValueError, TypeError):
-                    continue # Ignora cabeçalhos que não são números de dia
-
-        # 5. Monta o JSON de saída final com a lógica de turnos
+        # 4. Processa os dados agrupados e normaliza os plantões
         lista_profissionais_final = []
-        for nome, data in profissionais_data.items():
-            if not data["plantoes_brutos"]: continue
+        for nome, rows in profissionais_raw_data.items():
+            info = {}
+            plantoes_brutos = defaultdict(list)
             
+            for row in rows:
+                if not info: # Pega as informações da primeira linha do profissional
+                    info["crm"] = row[col_map.get("CRM")] if "CRM" in col_map and col_map.get("CRM") < len(row) and row[col_map.get("CRM")] else "N/I"
+                    info["cargo"] = row[col_map.get("CARGO")] if "CARGO" in col_map else "N/I"
+                    info["vinculo"] = row[col_map.get("VÍNCULO")] if "VÍNCULO" in col_map else "N/I"
+
+                for dia_str, col_idx in col_map.items():
+                    try:
+                        dia = int(dia_str)
+                        if col_idx < len(row) and row[col_idx]:
+                            plantoes_brutos[dia].append(str(row[col_idx]))
+                    except (ValueError, TypeError):
+                        continue
+
+            if not plantoes_brutos: continue
+
             profissional_obj = {
-                "medico_nome": nome,
-                "medico_crm": data["info"]["crm"],
-                "medico_especialidade": data["info"]["cargo"],
-                "medico_vinculo": data["info"]["vinculo"],
-                "medico_setor": setor,
-                "plantoes": []
+                "medico_nome": nome, "medico_crm": str(info["crm"]),
+                "medico_especialidade": str(info["cargo"]), "medico_vinculo": str(info["vinculo"]),
+                "medico_setor": setor, "plantoes": []
             }
 
-            for dia, tokens in sorted(data["plantoes_brutos"].items()):
+            for dia, tokens in sorted(plantoes_brutos.items()):
                 for token in set(tokens):
                     turnos = interpretar_turno(token, setor)
                     for turno_info in turnos:
                         data_plantao = datetime(ano, mes, dia)
                         if turno_info["turno"] == "NOITE (fim)":
                             data_plantao += timedelta(days=1)
-                        
                         horarios = HORARIOS_TURNO.get(turno_info["turno"], {})
                         profissional_obj["plantoes"].append({
                             "dia": dia, "data": data_plantao.strftime('%d/%m/%Y'),
@@ -254,13 +246,13 @@ async def normaliza_escala_from_pdf(request: Request):
             if profissional_obj["plantoes"]:
                 profissional_obj["plantoes"].sort(key=lambda p: (p["dia"], p["inicio"] or ""))
                 lista_profissionais_final.append(profissional_obj)
-
+        
         mes_nome_str = list(MONTH_MAP.keys())[list(MONTH_MAP.values()).index(mes)]
-        final_output = [{
+        final_output.append({
             "unidade_escala": unidade,
             "mes_ano_escala": f"{mes_nome_str}/{ano}",
             "profissionais": lista_profissionais_final
-        }]
+        })
         
         return JSONResponse(content=final_output)
 
