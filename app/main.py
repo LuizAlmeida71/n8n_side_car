@@ -337,7 +337,7 @@ if __name__ == "__main__":
 
 # --- FIM normaliza-escala-xlsx-JSON ---
 
-# --- INÍCIO normaliza-escala-normaliza-escala-xlsx-JSON ---
+# --- INÍCIO normaliza-escala-from-pdf ---
 # --- CONFIGURAÇÕES E MAPEAMENTOS GLOBAIS ---
 MONTH_MAP = {
     'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
@@ -363,16 +363,13 @@ def parse_mes_ano(text):
 def interpretar_turno(token, medico_setor):
     if not token or not isinstance(token, str): return []
     token_upper = token.upper().replace('\n', '').replace('/', '').replace(' ', '')
-    
     if "N1N2" in token_upper: return [{"turno": "NOITE"}]
-    
     if "MTN" in token_upper: tokens = ["M", "T", "N"]
     elif "DN" in token_upper: tokens = ["D", "N"]
     elif "M/T" in token_upper or "MT" in token_upper: tokens = ["M", "T"]
     elif "T/N" in token_upper or "TN" in token_upper: tokens = ["T", "N"]
     elif "M/N" in token_upper or "MN" in token_upper: tokens = ["M", "N"]
     else: tokens = re.findall(r'[MTNDC]', token_upper)
-    
     turnos_finais = []
     for t in list(dict.fromkeys(tokens)):
         if t == 'M': turnos_finais.append({"turno": "MANHÃ"})
@@ -441,26 +438,29 @@ async def normaliza_escala_from_pdf(request: Request):
         cleaned_rows = []
         last_name = None
         nome_idx = col_map.get("NOME COMPLETO")
+        
+        # ---- CORREÇÃO DO BUG ----
+        if nome_idx is None:
+            return JSONResponse(content={"error": "Coluna 'NOME COMPLETO' não encontrada no cabeçalho."}, status_code=400)
+        # -------------------------
 
         for row in all_table_rows[header_index + 1:]:
-            if not row or len(row) < nome_idx + 1: continue
+            if not row or len(row) <= nome_idx: continue
             
             nome_bruto = row[nome_idx]
             if nome_bruto and is_valid_professional_name(nome_bruto):
                 last_name = nome_bruto.replace('\n', ' ').strip()
             
             if last_name:
-                new_row = list(row) # Cria uma cópia
+                new_row = list(row)
                 new_row[nome_idx] = last_name
                 cleaned_rows.append(new_row)
 
-        # Agrupa os dados limpos
         profissionais_data = defaultdict(lambda: {"info_rows": []})
         for row in cleaned_rows:
             nome = row[nome_idx]
             profissionais_data[nome]["info_rows"].append(row)
 
-        # Monta a saída final
         lista_profissionais_final = []
         for nome, data in profissionais_data.items():
             info_rows = data["info_rows"]
@@ -513,7 +513,7 @@ async def normaliza_escala_from_pdf(request: Request):
     except Exception as e:
         return JSONResponse(content={"error": str(e), "trace": traceback.format_exc()}, status_code=500)
 
-# --- FIM normaliza-escala-xlsx-JSON ---
+# --- FIM normaliza-escala-from-pdf ---
 
 @app.post("/text-to-pdf")
 async def text_to_pdf(request: Request):
