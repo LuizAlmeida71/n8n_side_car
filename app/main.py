@@ -116,7 +116,6 @@ def interpretar_turno(token, medico_setor):
     
     if "N1N2" in token_upper: return [{"turno": "NOITE"}]
     
-    # Expande siglas como MTN, DN
     expanded = []
     if "MTN" in token_upper: expanded.extend(["M", "T", "N"])
     elif "DN" in token_upper: expanded.extend(["D", "N"])
@@ -125,7 +124,7 @@ def interpretar_turno(token, medico_setor):
     turnos_finais = []
     for sub_token in expanded:
         found_tokens = re.findall(r'[MTNDC]', sub_token)
-        for t in list(dict.fromkeys(found_tokens)): # Remove duplicados
+        for t in list(dict.fromkeys(found_tokens)):
             if t == 'M': turnos_finais.append({"turno": "MANHÃ"})
             elif t == 'T': turnos_finais.append({"turno": "TARDE"})
             elif t == 'D': 
@@ -146,14 +145,27 @@ async def normaliza_escala_from_pdf(request: Request):
     try:
         body = await request.json()
         
-        # 1. Concatena o texto de todas as páginas para extração de metadados globais
         full_text = ""
+        all_table_rows = []
+
+        # OTIMIZAÇÃO: Processa cada página UMA ÚNICA VEZ
         for page_data in body:
             b64_data = page_data.get("bae64")
             if not b64_data: continue
+            
             pdf_bytes = base64.b64decode(b64_data)
             with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
-                full_text += doc[0].get_text() + "\n"
+                page = doc[0]
+                # Extrai texto para metadados
+                full_text += page.get_text() + "\n"
+                # Extrai tabelas
+                tables = page.find_tables()
+                for table in tables:
+                    # Acessa o cabeçalho usando o atributo .names
+                    headers = table.header.names 
+                    if headers and any("NOME COMPLETO" in str(h).upper() for h in headers):
+                        # Adiciona as linhas da tabela principal à lista
+                        all_table_rows.extend(table.extract())
 
         unidade_match = re.search(r'UNIDADE:\s*(.*?)\n', full_text, re.IGNORECASE)
         setor_match = re.search(r'UNIDADE SETOR:\s*(.*?)\n', full_text, re.IGNORECASE)
@@ -164,22 +176,7 @@ async def normaliza_escala_from_pdf(request: Request):
         
         if mes is None or ano is None:
             return JSONResponse(content={"error": "Não foi possível extrair Mês/Ano do documento."}, status_code=400)
-
-        # 2. Extrai as linhas da tabela principal de cada página
-        all_table_rows = []
-        for page_data in body:
-            b64_data = page_data.get("bae64")
-            if not b64_data: continue
-            pdf_bytes = base64.b64decode(b64_data)
-            with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
-                page = doc[0]
-                tables = page.find_tables()
-                for table in tables:
-                    headers = table.header.names
-                    if headers and any("NOME COMPLETO" in str(h) for h in headers):
-                        all_table_rows.extend(table.extract())
-                        break
-
+        
         if not all_table_rows:
             return JSONResponse(content={"error": "Nenhuma tabela de escala principal encontrada."}, status_code=400)
             
@@ -187,8 +184,7 @@ async def normaliza_escala_from_pdf(request: Request):
         col_map = {str(name).replace('\n', ' '): i for i, name in enumerate(header_row) if name}
         if "CONSELHO DE CLASSE" in col_map: col_map["CRM"] = col_map["CONSELHO DE CLASSE"]
             
-        # 3. Agrupa linhas por profissional
-        profissionais_raw_data = defaultdict(list)
+        profissionais_data = defaultdict(lambda: {"info": {}, "plantoes_brutos": defaultdict(list)})
         last_professional_name = None
         nome_idx = col_map.get("NOME COMPLETO")
 
@@ -199,38 +195,36 @@ async def normaliza_escala_from_pdf(request: Request):
             if nome_bruto and len(nome_bruto.strip()) > 3 and "NOME COMPLETO" not in nome_bruto.upper():
                 last_professional_name = nome_bruto.replace('\n', ' ').strip()
             
-            if last_professional_name:
-                profissionais_raw_data[last_professional_name].append(row)
+            if not last_professional_name: continue
 
-        # 4. Processa os dados agrupados e normaliza os plantões
+            info = profissionais_data[last_professional_name]["info"]
+            if not info:
+                info["medico_nome"] = last_professional_name
+                info["cargo"] = row[col_map.get("CARGO")] if "CARGO" in col_map else "N/I"
+                info["vinculo"] = row[col_map.get("VÍNCULO")] if "VÍNCULO" in col_map else "N/I"
+                crm_val = row[col_map.get("CRM")] if "CRM" in col_map and col_map.get("CRM") < len(row) else None
+                info["crm"] = str(crm_val).strip() if crm_val else "N/I"
+
+            for dia_str, col_idx in col_map.items():
+                try:
+                    dia = int(dia_str)
+                    if col_idx < len(row) and row[col_idx]:
+                        profissionais_data[last_professional_name]["plantoes_brutos"][dia].append(str(row[col_idx]))
+                except (ValueError, TypeError):
+                    continue
+
         lista_profissionais_final = []
-        for nome, rows in profissionais_raw_data.items():
-            info = {}
-            plantoes_brutos = defaultdict(list)
+        for nome, data in profissionais_data.items():
+            if not data["plantoes_brutos"]: continue
             
-            for row in rows:
-                if not info: # Pega as informações da primeira linha do profissional
-                    info["crm"] = row[col_map.get("CRM")] if "CRM" in col_map and col_map.get("CRM") < len(row) and row[col_map.get("CRM")] else "N/I"
-                    info["cargo"] = row[col_map.get("CARGO")] if "CARGO" in col_map else "N/I"
-                    info["vinculo"] = row[col_map.get("VÍNCULO")] if "VÍNCULO" in col_map else "N/I"
-
-                for dia_str, col_idx in col_map.items():
-                    try:
-                        dia = int(dia_str)
-                        if col_idx < len(row) and row[col_idx]:
-                            plantoes_brutos[dia].append(str(row[col_idx]))
-                    except (ValueError, TypeError):
-                        continue
-
-            if not plantoes_brutos: continue
-
             profissional_obj = {
-                "medico_nome": nome, "medico_crm": str(info["crm"]),
-                "medico_especialidade": str(info["cargo"]), "medico_vinculo": str(info["vinculo"]),
+                "medico_nome": nome, "medico_crm": str(data["info"].get("crm", "N/I")),
+                "medico_especialidade": str(data["info"].get("cargo", "N/I")),
+                "medico_vinculo": str(data["info"].get("vinculo", "N/I")),
                 "medico_setor": setor, "plantoes": []
             }
-
-            for dia, tokens in sorted(plantoes_brutos.items()):
+            
+            for dia, tokens in sorted(data["plantoes_brutos"].items()):
                 for token in set(tokens):
                     turnos = interpretar_turno(token, setor)
                     for turno_info in turnos:
@@ -248,11 +242,11 @@ async def normaliza_escala_from_pdf(request: Request):
                 lista_profissionais_final.append(profissional_obj)
         
         mes_nome_str = list(MONTH_MAP.keys())[list(MONTH_MAP.values()).index(mes)]
-        final_output.append({
+        final_output = [{
             "unidade_escala": unidade,
             "mes_ano_escala": f"{mes_nome_str}/{ano}",
             "profissionais": lista_profissionais_final
-        })
+        }]
         
         return JSONResponse(content=final_output)
 
