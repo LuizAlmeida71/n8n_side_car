@@ -112,94 +112,148 @@ def parse_mes_ano(text):
 def interpretar_turno(token, medico_setor):
     if not token or not isinstance(token, str): return []
     token_upper = token.upper().replace('\n', '').replace('/', '').replace(' ', '')
+    
     if "N1N2" in token_upper: return [{"turno": "NOITE"}]
-    expanded = []
-    if "MTN" in token_upper: expanded.extend(["M", "T", "N"])
-    elif "DN" in token_upper: expanded.extend(["D", "N"])
-    else: expanded.append(token_upper)
+    
+    # Mapeia siglas completas antes de expandir letras individuais
+    if "MTN" in token_upper: tokens = ["M", "T", "N"]
+    elif "DN" in token_upper: tokens = ["D", "N"]
+    elif "M/T" in token_upper or "MT" in token_upper: tokens = ["M", "T"]
+    elif "T/N" in token_upper or "TN" in token_upper: tokens = ["T", "N"]
+    elif "M/N" in token_upper or "MN" in token_upper: tokens = ["M", "N"]
+    else: tokens = re.findall(r'[MTNDC]', token_upper)
+    
     turnos_finais = []
-    for sub_token in expanded:
-        found_tokens = re.findall(r'[MTNDC]', sub_token)
-        for t in list(dict.fromkeys(found_tokens)):
-            if t == 'M': turnos_finais.append({"turno": "MANHÃ"})
-            elif t == 'T': turnos_finais.append({"turno": "TARDE"})
-            elif t == 'D': 
-                turnos_finais.append({"turno": "MANHÃ"})
-                turnos_finais.append({"turno": "TARDE"})
-            elif t in ['N', 'C']:
-                if any(s in medico_setor.upper() for s in SETORES_NOITE_COMPLETA):
-                    turnos_finais.append({"turno": "NOITE"})
-                else:
-                    turnos_finais.append({"turno": "NOITE (início)"})
-                    turnos_finais.append({"turno": "NOITE (fim)"})
+    for t in list(dict.fromkeys(tokens)):
+        if t == 'M': turnos_finais.append({"turno": "MANHÃ"})
+        elif t == 'T': turnos_finais.append({"turno": "TARDE"})
+        elif t == 'D': 
+            turnos_finais.append({"turno": "MANHÃ"})
+            turnos_finais.append({"turno": "TARDE"})
+        elif t in ['N', 'C']:
+            is_noite_completa = any(s in medico_setor.upper() for s in SETORES_NOITE_COMPLETA)
+            if is_noite_completa or "19:00 às\n07:00" in token: # Checagem extra
+                turnos_finais.append({"turno": "NOITE"})
+            else:
+                turnos_finais.append({"turno": "NOITE (início)"})
+                turnos_finais.append({"turno": "NOITE (fim)"})
     return turnos_finais
 
-# --- ENDPOINT PRINCIPAL (PDF DIRETO - ESTRATÉGIA ROBUSTA) ---
+def is_valid_professional_name(name):
+    if not name or not isinstance(name, str): return False
+    name_upper = name.strip().upper()
+    ignored = ["NOME COMPLETO", "LEGENDA", "* INFORMA", "CAPACITAÇÃO", "PROCESSO", "ASSINATURA"]
+    return all(keyword not in name_upper for keyword in ignored) and len(name.split()) > 1
 
+# --- ENDPOINT PRINCIPAL ---
 @app.post("/normaliza-escala-from-pdf")
 async def normaliza_escala_from_pdf(request: Request):
     try:
         body = await request.json()
         
+        # 1. Concatena texto e extrai tabelas de todas as páginas
         full_text = ""
-        all_words = []
-
-        # 1. Extrai todas as palavras e suas coordenadas de cada página
+        all_pages_tables = []
         for page_data in body:
             b64_data = page_data.get("bae64")
             if not b64_data: continue
-            
             pdf_bytes = base64.b64decode(b64_data)
             with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
                 page = doc[0]
                 full_text += page.get_text("text") + "\n"
-                all_words.extend(page.get_text("words"))
-        
-        # 2. Extrai metadados do texto completo
+                all_pages_tables.append(page.find_tables())
+
+        # 2. Extrai metadados globais
         unidade_match = re.search(r'UNIDADE:\s*(.*?)\n', full_text, re.IGNORECASE)
         setor_match = re.search(r'UNIDADE SETOR:\s*(.*?)\n', full_text, re.IGNORECASE)
         mes, ano = parse_mes_ano(full_text)
         
         unidade = unidade_match.group(1).strip() if unidade_match else "NÃO INFORMADO"
         setor = setor_match.group(1).strip() if setor_match else "NÃO INFORMADO"
-
+        
         if mes is None or ano is None:
             return JSONResponse(content={"error": "Não foi possível extrair Mês/Ano do documento."}, status_code=400)
 
-        # 3. Reconstrói as linhas da tabela a partir das coordenadas das palavras
-        all_words.sort(key=lambda w: (w[1], w[0])) # Ordena por y, depois por x
-        rows = defaultdict(list)
-        for x0, y0, x1, y1, word, _, _, _ in all_words:
-            # Agrupa palavras na mesma linha vertical (com uma tolerância de 2 pixels)
-            rows[int(y0 // 2) * 2].append(word)
+        # 3. Processa as tabelas encontradas
+        profissionais_data = defaultdict(lambda: {"info_rows": [], "plantoes_brutos": defaultdict(list)})
+        for tables_on_page in all_pages_tables:
+            for table in tables_on_page:
+                extracted_rows = table.extract()
+                if not extracted_rows: continue
 
-        reconstructed_rows = [" ".join(words) for _, words in sorted(rows.items())]
+                header_row = extracted_rows[0]
+                if "NOME COMPLETO" not in ' '.join(map(str, header_row)): continue
 
-        # 4. Encontra o cabeçalho e os dados da escala
-        header_index = -1
-        for i, row_text in enumerate(reconstructed_rows):
-            if "NOME COMPLETO" in row_text.upper() and "VÍNCULO" in row_text.upper():
-                header_index = i
-                break
-        
-        if header_index == -1:
-            return JSONResponse(content={"error": "Cabeçalho da escala não encontrado."}, status_code=400)
-        
-        # Simplesmente pega as linhas de dados após o cabeçalho
-        data_rows_text = reconstructed_rows[header_index + 1:]
+                col_map = {str(name).replace('\n', ' '): i for i, name in enumerate(header_row) if name}
+                if "CONSELHO DE CLASSE" in col_map: col_map["CRM"] = col_map["CONSELHO DE CLASSE"]
+                
+                last_professional_name = None
+                nome_idx = col_map.get("NOME COMPLETO")
 
-        # 5. Processa as linhas de texto para normalizar
-        # (Esta parte é mais conceitual e precisaria de uma lógica de parsing de texto mais complexa,
-        # mas a reconstrução da grade é o passo mais importante)
+                for row in extracted_rows[1:]:
+                    nome_bruto = row[nome_idx] if nome_idx is not None and nome_idx < len(row) else None
+                    if nome_bruto and is_valid_professional_name(nome_bruto):
+                        last_professional_name = nome_bruto.replace('\n', ' ').strip()
+                    
+                    if not last_professional_name: continue
+                    
+                    profissionais_data[last_professional_name]["info_rows"].append(row)
+                    
+                    for dia_str, col_idx in col_map.items():
+                        try:
+                            dia = int(dia_str)
+                            if col_idx < len(row) and row[col_idx]:
+                                profissionais_data[last_professional_name]["plantoes_brutos"][dia].append(str(row[col_idx]))
+                        except (ValueError, TypeError):
+                            continue
         
-        # Para fins de depuração, vamos retornar os dados reconstruídos
-        return JSONResponse(content={
+        # 4. Consolida e formata a saída final
+        lista_profissionais_final = []
+        for nome, data in profissionais_data.items():
+            info_rows = data["info_rows"]
+            plantoes_brutos = data["plantoes_brutos"]
+
+            if not info_rows or not plantoes_brutos: continue
+            
+            # Pega as informações da primeira linha, que é a mais provável de estar completa
+            primeira_linha = info_rows[0]
+            cargo_idx = col_map.get("CARGO")
+            vinculo_idx = col_map.get("VÍNCULO")
+            crm_idx = col_map.get("CRM")
+
+            profissional_obj = {
+                "medico_nome": nome,
+                "medico_crm": str(primeira_linha[crm_idx]).strip() if crm_idx and crm_idx < len(primeira_linha) and primeira_linha[crm_idx] else "N/I",
+                "medico_especialidade": str(primeira_linha[cargo_idx]).strip() if cargo_idx and cargo_idx < len(primeira_linha) else "N/I",
+                "medico_vinculo": str(primeira_linha[vinculo_idx]).strip() if vinculo_idx and vinculo_idx < len(primeira_linha) else "N/I",
+                "medico_setor": setor, "plantoes": []
+            }
+            
+            for dia, tokens in sorted(plantoes_brutos.items()):
+                for token in set(tokens): # `set` remove duplicatas no mesmo dia
+                    turnos = interpretar_turno(token, setor)
+                    for turno_info in turnos:
+                        data_plantao = datetime(ano, mes, dia)
+                        if turno_info["turno"] == "NOITE (fim)":
+                            data_plantao += timedelta(days=1)
+                        horarios = HORARIOS_TURNO.get(turno_info["turno"], {})
+                        profissional_obj["plantoes"].append({
+                            "dia": dia, "data": data_plantao.strftime('%d/%m/%Y'),
+                            "turno": turno_info["turno"], "inicio": horarios.get("inicio"), "fim": horarios.get("fim")
+                        })
+            
+            if profissional_obj["plantoes"]:
+                profissional_obj["plantoes"].sort(key=lambda p: (p["dia"], p["inicio"] or ""))
+                lista_profissionais_final.append(profissional_obj)
+        
+        mes_nome_str = list(MONTH_MAP.keys())[list(MONTH_MAP.values()).index(mes)]
+        final_output = [{
             "unidade_escala": unidade,
-            "mes_ano_escala": f"{list(MONTH_MAP.keys())[mes-1]}/{ano}",
-            "setor": setor,
-            "linhas_reconstruidas": data_rows_text,
-            "aviso": "Implementação final da normalização a partir das linhas reconstruídas é necessária."
-        })
+            "mes_ano_escala": f"{mes_nome_str}/{ano}",
+            "profissionais": lista_profissionais_final
+        }]
+        
+        return JSONResponse(content=final_output)
 
     except Exception as e:
         return JSONResponse(content={"error": str(e), "trace": traceback.format_exc()}, status_code=500)
@@ -255,7 +309,6 @@ async def text_to_pdf(request: Request):
 
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
-
 
 # --- Início normaliza-escala-json ---
 # --- CONFIGURAÇÕES E MAPEAMENTOS GLOBAIS ---
