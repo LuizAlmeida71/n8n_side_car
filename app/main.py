@@ -106,7 +106,7 @@ SETORES_NOITE_COMPLETA = ["UTI", "TERAPIA INTENSIVA", "EMERGÊNCIA"]
 
 # --- FUNÇÕES AUXILIARES ---
 
-def extrair_metadados_do_json(data: List[Dict]) -> Dict[str, Any]:
+def extrair_metadados_do_json(data):
     """Extrai metadados (unidade, setor, mês/ano) dos dados JSON"""
     texto_completo = ""
     
@@ -133,7 +133,7 @@ def extrair_metadados_do_json(data: List[Dict]) -> Dict[str, Any]:
     
     return {"unidade": unidade, "setor": setor, "mes": mes, "ano": ano}
 
-def interpretar_turno(token: str, setor: str) -> List[Dict[str, str]]:
+def interpretar_turno(token: str, setor: str):
     """Interpreta tokens de turno (M, T, N, D, etc.) e retorna lista de turnos"""
     if not token or not isinstance(token, str):
         return []
@@ -183,7 +183,7 @@ def interpretar_turno(token: str, setor: str) -> List[Dict[str, str]]:
     
     return turnos_finais
 
-def is_valid_professional_row(row: List, nome_idx: int = 0) -> bool:
+def is_valid_professional_row(row, nome_idx: int = 0):
     """Verifica se a linha representa um profissional válido"""
     if not row or nome_idx >= len(row):
         return False
