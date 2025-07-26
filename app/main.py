@@ -423,7 +423,7 @@ async def normaliza_escala_from_pdf(request: Request):
         
         header_row, header_index = None, -1
         for i, row in enumerate(all_table_rows):
-            if row and any("NOME COMPLETO" in str(cell).upper().replace('\n', ' ') for cell in row):
+            if row and any("NOME" in str(cell).upper() and "COMPLETO" in str(cell).upper() for cell in row):
                 header_row = row
                 header_index = i
                 break
@@ -431,19 +431,25 @@ async def normaliza_escala_from_pdf(request: Request):
         if not header_row:
             return JSONResponse(content={"error": "Cabeçalho da escala não encontrado."}, status_code=400)
 
-        col_map = {str(name).replace('\n', ' '): i for i, name in enumerate(header_row) if name}
-        if "CONSELHO DE CLASSE" in col_map: col_map["CRM"] = col_map["CONSELHO DE CLASSE"]
+        # ---- LÓGICA DE MAPEAMENTO DE COLUNA ROBUSTA ----
+        col_map = {}
+        for i, col_name in enumerate(header_row):
+            if not col_name: continue
+            clean_name = str(col_name).replace('\n', ' ').strip().upper()
+            if "NOME COMPLETO" in clean_name: col_map["NOME COMPLETO"] = i
+            elif "CARGO" in clean_name: col_map["CARGO"] = i
+            elif "VÍNCULO" in clean_name: col_map["VÍNCULO"] = i
+            elif "CONSELHO" in clean_name or "CRM" in clean_name: col_map["CRM"] = i
+            elif isinstance(col_name, (int, float)) or col_name.isdigit():
+                 col_map[int(col_name)] = i
+        
+        nome_idx = col_map.get("NOME COMPLETO")
+        if nome_idx is None:
+            return JSONResponse(content={"error": "Coluna 'NOME COMPLETO' não pode ser mapeada no cabeçalho."}, status_code=400)
         
         # Etapa de "Desfazer Merge" e limpeza
         cleaned_rows = []
         last_name = None
-        nome_idx = col_map.get("NOME COMPLETO")
-        
-        # ---- CORREÇÃO DO BUG ----
-        if nome_idx is None:
-            return JSONResponse(content={"error": "Coluna 'NOME COMPLETO' não encontrada no cabeçalho."}, status_code=400)
-        # -------------------------
-
         for row in all_table_rows[header_index + 1:]:
             if not row or len(row) <= nome_idx: continue
             
@@ -461,6 +467,7 @@ async def normaliza_escala_from_pdf(request: Request):
             nome = row[nome_idx]
             profissionais_data[nome]["info_rows"].append(row)
 
+        # Monta a saída final
         lista_profissionais_final = []
         for nome, data in profissionais_data.items():
             info_rows = data["info_rows"]
@@ -477,12 +484,10 @@ async def normaliza_escala_from_pdf(request: Request):
             
             plantoes_brutos = defaultdict(list)
             for row in info_rows:
-                for dia_str, col_idx in col_map.items():
-                    try:
-                        dia = int(dia_str)
+                for dia, col_idx in col_map.items():
+                    if isinstance(dia, int):
                         if col_idx < len(row) and row[col_idx]:
                             plantoes_brutos[dia].append(str(row[col_idx]))
-                    except (ValueError, TypeError): continue
             
             for dia, tokens in sorted(plantoes_brutos.items()):
                 for token in set(tokens):
