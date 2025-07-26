@@ -10,6 +10,8 @@ import traceback
 from collections import defaultdict
 import re
 from datetime import datetime, timedelta
+import textwrap
+from fpdf import FPDF
 
 app = FastAPI()
 
@@ -330,13 +332,186 @@ if __name__ == "__main__":
 
 # --- FIM normaliza-escala-xlsx-JSON ---
 
+# --- INÍCIO normaliza-escala-normaliza-escala-xlsx-JSON ---
+# --- CONFIGURAÇÕES E MAPEAMENTOS GLOBAIS ---
+MONTH_MAP = {
+    'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
+    'JUNHO': 6, 'JULHO': 7, 'AGOSTO': 8, 'SETEMBRO': 9, 'OUTUBRO': 10,
+    'NOVEMBRO': 11, 'DEZEMBRO': 12
+}
+HORARIOS_TURNO = {
+    "MANHÃ": {"inicio": "07:00", "fim": "13:00"}, "TARDE": {"inicio": "13:00", "fim": "19:00"},
+    "NOITE": {"inicio": "19:00", "fim": "07:00"}, "NOITE (início)": {"inicio": "19:00", "fim": "01:00"},
+    "NOITE (fim)": {"inicio": "01:00", "fim": "07:00"}
+}
+SETORES_NOITE_COMPLETA = ["UTI", "TERAPIA INTENSIVA"]
 
-from fastapi import Request
-from fastapi.responses import JSONResponse
-from fpdf import FPDF
-import base64
-import os
-import textwrap
+# --- FUNÇÕES AUXILIARES ---
+def parse_mes_ano(text):
+    match = re.search(r'MÊS[\s/:]*([A-ZÇÃ]+)[\s/]*(\d{4})', text.upper())
+    if not match: return None, None
+    mes_nome, ano_str = match.groups()
+    mes = MONTH_MAP.get(mes_nome)
+    ano = int(ano_str)
+    return mes, ano
+
+def interpretar_turno(token, medico_setor):
+    if not token or not isinstance(token, str): return []
+    token_upper = token.upper().replace('\n', '').replace('/', '').replace(' ', '')
+    
+    if "N1N2" in token_upper: return [{"turno": "NOITE"}]
+    
+    if "MTN" in token_upper: tokens = ["M", "T", "N"]
+    elif "DN" in token_upper: tokens = ["D", "N"]
+    elif "M/T" in token_upper or "MT" in token_upper: tokens = ["M", "T"]
+    elif "T/N" in token_upper or "TN" in token_upper: tokens = ["T", "N"]
+    elif "M/N" in token_upper or "MN" in token_upper: tokens = ["M", "N"]
+    else: tokens = re.findall(r'[MTNDC]', token_upper)
+    
+    turnos_finais = []
+    for t in list(dict.fromkeys(tokens)):
+        if t == 'M': turnos_finais.append({"turno": "MANHÃ"})
+        elif t == 'T': turnos_finais.append({"turno": "TARDE"})
+        elif t == 'D': 
+            turnos_finais.append({"turno": "MANHÃ"})
+            turnos_finais.append({"turno": "TARDE"})
+        elif t in ['N', 'C']:
+            is_noite_completa = any(s in medico_setor.upper() for s in SETORES_NOITE_COMPLETA)
+            if is_noite_completa:
+                turnos_finais.append({"turno": "NOITE"})
+            else:
+                turnos_finais.append({"turno": "NOITE (início)"})
+                turnos_finais.append({"turno": "NOITE (fim)"})
+    return turnos_finais
+
+def is_valid_professional_name(name):
+    if not name or not isinstance(name, str): return False
+    name_upper = name.strip().upper()
+    ignored = ["NOME COMPLETO", "LEGENDA", "* INFORMA", "CAPACITAÇÃO", "PROCESSO", "ASSINATURA", "ASSINADO"]
+    if any(keyword in name_upper for keyword in ignored): return False
+    return len(name.split()) > 1
+
+# --- ENDPOINT CORRETO PARA NORMALIZAR PDF EM BASE64 ---
+@app.post("/normaliza-escala-from-pdf")
+async def normaliza_escala_from_pdf(request: Request):
+    try:
+        body = await request.json()
+        
+        full_text = ""
+        all_pages_tables = []
+        for page_data in body:
+            b64_data = page_data.get("bae64")
+            if not b64_data: continue
+            
+            pdf_bytes = base64.b64decode(b64_data)
+            with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+                page = doc[0]
+                full_text += page.get_text("text") + "\n"
+                tables = page.find_tables()
+                if tables:
+                    all_pages_tables.append(tables)
+
+        unidade_match = re.search(r'UNIDADE:\s*(.*?)\n', full_text, re.IGNORECASE)
+        setor_match = re.search(r'UNIDADE SETOR:\s*(.*?)\n', full_text, re.IGNORECASE)
+        mes, ano = parse_mes_ano(full_text)
+        
+        unidade = unidade_match.group(1).strip() if unidade_match else "NÃO INFORMADO"
+        setor = setor_match.group(1).strip() if setor_match else "NÃO INFORMADO"
+        
+        if mes is None or ano is None:
+            return JSONResponse(content={"error": "Não foi possível extrair Mês/Ano do documento."}, status_code=400)
+
+        profissionais_data = defaultdict(lambda: {"info_rows": [], "plantoes_brutos": defaultdict(list)})
+        for tables_on_page in all_pages_tables:
+            for table in tables_on_page:
+                extracted_rows = table.extract()
+                if not extracted_rows: continue
+
+                header_row, header_start_index = None, -1
+                for i, row in enumerate(extracted_rows):
+                    if row and any("NOME COMPLETO" in str(cell).upper().replace('\n', ' ') for cell in row):
+                        header_row = row
+                        header_start_index = i
+                        break
+                
+                if not header_row: continue
+
+                col_map = {str(name).replace('\n', ' '): i for i, name in enumerate(header_row) if name}
+                if "CONSELHO DE CLASSE" in col_map: col_map["CRM"] = col_map["CONSELHO DE CLASSE"]
+                
+                last_professional_name = None
+                nome_idx = col_map.get("NOME COMPLETO")
+
+                for row in extracted_rows[header_start_index + 1:]:
+                    nome_bruto = row[nome_idx] if nome_idx is not None and nome_idx < len(row) and row[nome_idx] else None
+                    if nome_bruto and is_valid_professional_name(nome_bruto):
+                        last_professional_name = nome_bruto.replace('\n', ' ').strip()
+                    
+                    if not last_professional_name: continue
+                    
+                    profissionais_data[last_professional_name]["info_rows"].append(row)
+                    
+                    for dia_str, col_idx in col_map.items():
+                        try:
+                            dia = int(dia_str)
+                            if col_idx < len(row) and row[col_idx]:
+                                profissionais_data[last_professional_name]["plantoes_brutos"][dia].append(str(row[col_idx]))
+                        except (ValueError, TypeError):
+                            continue
+        
+        lista_profissionais_final = []
+        for nome, data in profissionais_data.items():
+            info_rows = data["info_rows"]
+            plantoes_brutos = data["plantoes_brutos"]
+
+            if not info_rows: continue
+            
+            primeira_linha = info_rows[0]
+            cargo_idx = col_map.get("CARGO")
+            vinculo_idx = col_map.get("VÍNCULO")
+            crm_idx = col_map.get("CRM")
+
+            profissional_obj = {
+                "medico_nome": nome,
+                "medico_crm": str(primeira_linha[crm_idx]).strip() if crm_idx and crm_idx < len(primeira_linha) and primeira_linha[crm_idx] else "N/I",
+                "medico_especialidade": str(primeira_linha[cargo_idx]).strip() if cargo_idx and cargo_idx < len(primeira_linha) else "N/I",
+                "medico_vinculo": str(primeira_linha[vinculo_idx]).strip() if vinculo_idx and vinculo_idx < len(primeira_linha) else "N/I",
+                "medico_setor": setor, "plantoes": []
+            }
+            
+            for dia, tokens in sorted(plantoes_brutos.items()):
+                for token in set(tokens):
+                    turnos = interpretar_turno(token, setor)
+                    for turno_info in turnos:
+                        data_plantao = datetime(ano, mes, dia)
+                        if turno_info["turno"] == "NOITE (fim)":
+                            data_plantao += timedelta(days=1)
+                        horarios = HORARIOS_TURNO.get(turno_info["turno"], {})
+                        profissional_obj["plantoes"].append({
+                            "dia": dia, "data": data_plantao.strftime('%d/%m/%Y'),
+                            "turno": turno_info["turno"], "inicio": horarios.get("inicio"), "fim": horarios.get("fim")
+                        })
+            
+            if profissional_obj["plantoes"]:
+                profissional_obj["plantoes"].sort(key=lambda p: (p["dia"], p["inicio"] or ""))
+                lista_profissionais_final.append(profissional_obj)
+        
+        if not lista_profissionais_final:
+            return JSONResponse(content={"error": "Nenhum profissional com plantões foi encontrado após a normalização."}, status_code=400)
+
+        mes_nome_str = list(MONTH_MAP.keys())[list(MONTH_MAP.values()).index(mes)]
+        final_output = [{
+            "unidade_escala": unidade,
+            "mes_ano_escala": f"{mes_nome_str}/{ano}",
+            "profissionais": lista_profissionais_final
+        }]
+        
+        return JSONResponse(content=final_output)
+
+    except Exception as e:
+        return JSONResponse(content={"error": str(e), "trace": traceback.format_exc()}, status_code=500)
+
+# --- FIM normaliza-escala-xlsx-JSON ---
 
 @app.post("/text-to-pdf")
 async def text_to_pdf(request: Request):
