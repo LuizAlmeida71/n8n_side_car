@@ -392,30 +392,28 @@ def interpretar_turno(token, medico_setor):
 def is_valid_professional_name(name):
     if not name or not isinstance(name, str): return False
     name_upper = name.strip().upper()
-    ignored = ["NOME COMPLETO", "LEGENDA", "* INFORMA", "CAPACITAÇÃO", "PROCESSO", "ASSINATURA", "ASSINADO"]
+    ignored = ["NOME COMPLETO", "LEGENDA", "ASSINATURA", "ASSINADO", "COMPLETO", "CARGO", "MATRÍCULA"]
     if any(keyword in name_upper for keyword in ignored): return False
-    return len(name.split()) > 1
+    return len(name.split()) >= 2
 
-# --- ENDPOINT CORRETO PARA NORMALIZAR PDF EM BASE64 ---
+# --- ENDPOINT PRINCIPAL ---
 @app.post("/normaliza-escala-from-pdf")
 async def normaliza_escala_from_pdf(request: Request):
     try:
         body = await request.json()
         
-        full_text = ""
-        all_pages_tables = []
+        full_text, all_table_rows = "", []
         for page_data in body:
             b64_data = page_data.get("bae64")
             if not b64_data: continue
-            
             pdf_bytes = base64.b64decode(b64_data)
             with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
                 page = doc[0]
                 full_text += page.get_text("text") + "\n"
-                tables = page.find_tables()
-                if tables:
-                    all_pages_tables.append(tables)
-
+                for table in page.find_tables():
+                    extracted = table.extract()
+                    if extracted: all_table_rows.extend(extracted)
+        
         unidade_match = re.search(r'UNIDADE:\s*(.*?)\n', full_text, re.IGNORECASE)
         setor_match = re.search(r'UNIDADE SETOR:\s*(.*?)\n', full_text, re.IGNORECASE)
         mes, ano = parse_mes_ano(full_text)
@@ -424,65 +422,67 @@ async def normaliza_escala_from_pdf(request: Request):
         setor = setor_match.group(1).strip() if setor_match else "NÃO INFORMADO"
         
         if mes is None or ano is None:
-            return JSONResponse(content={"error": "Não foi possível extrair Mês/Ano do documento."}, status_code=400)
-
-        profissionais_data = defaultdict(lambda: {"info_rows": [], "plantoes_brutos": defaultdict(list)})
-        for tables_on_page in all_pages_tables:
-            for table in tables_on_page:
-                extracted_rows = table.extract()
-                if not extracted_rows: continue
-
-                header_row, header_start_index = None, -1
-                for i, row in enumerate(extracted_rows):
-                    if row and any("NOME COMPLETO" in str(cell).upper().replace('\n', ' ') for cell in row):
-                        header_row = row
-                        header_start_index = i
-                        break
-                
-                if not header_row: continue
-
-                col_map = {str(name).replace('\n', ' '): i for i, name in enumerate(header_row) if name}
-                if "CONSELHO DE CLASSE" in col_map: col_map["CRM"] = col_map["CONSELHO DE CLASSE"]
-                
-                last_professional_name = None
-                nome_idx = col_map.get("NOME COMPLETO")
-
-                for row in extracted_rows[header_start_index + 1:]:
-                    nome_bruto = row[nome_idx] if nome_idx is not None and nome_idx < len(row) and row[nome_idx] else None
-                    if nome_bruto and is_valid_professional_name(nome_bruto):
-                        last_professional_name = nome_bruto.replace('\n', ' ').strip()
-                    
-                    if not last_professional_name: continue
-                    
-                    profissionais_data[last_professional_name]["info_rows"].append(row)
-                    
-                    for dia_str, col_idx in col_map.items():
-                        try:
-                            dia = int(dia_str)
-                            if col_idx < len(row) and row[col_idx]:
-                                profissionais_data[last_professional_name]["plantoes_brutos"][dia].append(str(row[col_idx]))
-                        except (ValueError, TypeError):
-                            continue
+            return JSONResponse(content={"error": "Mês/Ano não encontrados."}, status_code=400)
         
+        header_row, header_index = None, -1
+        for i, row in enumerate(all_table_rows):
+            if row and any("NOME COMPLETO" in str(cell).upper().replace('\n', ' ') for cell in row):
+                header_row = row
+                header_index = i
+                break
+        
+        if not header_row:
+            return JSONResponse(content={"error": "Cabeçalho da escala não encontrado."}, status_code=400)
+
+        col_map = {str(name).replace('\n', ' '): i for i, name in enumerate(header_row) if name}
+        if "CONSELHO DE CLASSE" in col_map: col_map["CRM"] = col_map["CONSELHO DE CLASSE"]
+        
+        # Etapa de "Desfazer Merge" e limpeza
+        cleaned_rows = []
+        last_name = None
+        nome_idx = col_map.get("NOME COMPLETO")
+
+        for row in all_table_rows[header_index + 1:]:
+            if not row or len(row) < nome_idx + 1: continue
+            
+            nome_bruto = row[nome_idx]
+            if nome_bruto and is_valid_professional_name(nome_bruto):
+                last_name = nome_bruto.replace('\n', ' ').strip()
+            
+            if last_name:
+                new_row = list(row) # Cria uma cópia
+                new_row[nome_idx] = last_name
+                cleaned_rows.append(new_row)
+
+        # Agrupa os dados limpos
+        profissionais_data = defaultdict(lambda: {"info_rows": []})
+        for row in cleaned_rows:
+            nome = row[nome_idx]
+            profissionais_data[nome]["info_rows"].append(row)
+
+        # Monta a saída final
         lista_profissionais_final = []
         for nome, data in profissionais_data.items():
             info_rows = data["info_rows"]
-            plantoes_brutos = data["plantoes_brutos"]
-
-            if not info_rows: continue
-            
             primeira_linha = info_rows[0]
-            cargo_idx = col_map.get("CARGO")
-            vinculo_idx = col_map.get("VÍNCULO")
-            crm_idx = col_map.get("CRM")
-
+            
             profissional_obj = {
                 "medico_nome": nome,
-                "medico_crm": str(primeira_linha[crm_idx]).strip() if crm_idx and crm_idx < len(primeira_linha) and primeira_linha[crm_idx] else "N/I",
-                "medico_especialidade": str(primeira_linha[cargo_idx]).strip() if cargo_idx and cargo_idx < len(primeira_linha) else "N/I",
-                "medico_vinculo": str(primeira_linha[vinculo_idx]).strip() if vinculo_idx and vinculo_idx < len(primeira_linha) else "N/I",
-                "medico_setor": setor, "plantoes": []
+                "medico_crm": str(primeira_linha[col_map.get("CRM")]).strip() if col_map.get("CRM") and col_map.get("CRM") < len(primeira_linha) and primeira_linha[col_map.get("CRM")] else "N/I",
+                "medico_especialidade": str(primeira_linha[col_map.get("CARGO")]).strip() if col_map.get("CARGO") and col_map.get("CARGO") < len(primeira_linha) else "N/I",
+                "medico_vinculo": str(primeira_linha[col_map.get("VÍNCULO")]).strip() if col_map.get("VÍNCULO") and col_map.get("VÍNCULO") < len(primeira_linha) else "N/I",
+                "medico_setor": setor,
+                "plantoes": []
             }
+            
+            plantoes_brutos = defaultdict(list)
+            for row in info_rows:
+                for dia_str, col_idx in col_map.items():
+                    try:
+                        dia = int(dia_str)
+                        if col_idx < len(row) and row[col_idx]:
+                            plantoes_brutos[dia].append(str(row[col_idx]))
+                    except (ValueError, TypeError): continue
             
             for dia, tokens in sorted(plantoes_brutos.items()):
                 for token in set(tokens):
@@ -501,9 +501,6 @@ async def normaliza_escala_from_pdf(request: Request):
                 profissional_obj["plantoes"].sort(key=lambda p: (p["dia"], p["inicio"] or ""))
                 lista_profissionais_final.append(profissional_obj)
         
-        if not lista_profissionais_final:
-            return JSONResponse(content={"error": "Nenhum profissional com plantões foi encontrado após a normalização."}, status_code=400)
-
         mes_nome_str = list(MONTH_MAP.keys())[list(MONTH_MAP.values()).index(mes)]
         final_output = [{
             "unidade_escala": unidade,
