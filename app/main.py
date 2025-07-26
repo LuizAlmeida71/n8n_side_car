@@ -148,7 +148,6 @@ async def normaliza_escala_from_pdf(request: Request):
         full_text = ""
         all_table_rows = []
 
-        # OTIMIZAÇÃO: Processa cada página UMA ÚNICA VEZ
         for page_data in body:
             b64_data = page_data.get("bae64")
             if not b64_data: continue
@@ -156,16 +155,13 @@ async def normaliza_escala_from_pdf(request: Request):
             pdf_bytes = base64.b64decode(b64_data)
             with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
                 page = doc[0]
-                # Extrai texto para metadados
                 full_text += page.get_text() + "\n"
-                # Extrai tabelas
                 tables = page.find_tables()
                 for table in tables:
-                    # Acessa o cabeçalho usando o atributo .names
-                    headers = table.header.names 
-                    if headers and any("NOME COMPLETO" in str(h).upper() for h in headers):
-                        # Adiciona as linhas da tabela principal à lista
-                        all_table_rows.extend(table.extract())
+                    # Adiciona todas as linhas de todas as tabelas detectadas
+                    extracted_rows = table.extract()
+                    if extracted_rows:
+                        all_table_rows.extend(extracted_rows)
 
         unidade_match = re.search(r'UNIDADE:\s*(.*?)\n', full_text, re.IGNORECASE)
         setor_match = re.search(r'UNIDADE SETOR:\s*(.*?)\n', full_text, re.IGNORECASE)
@@ -178,9 +174,20 @@ async def normaliza_escala_from_pdf(request: Request):
             return JSONResponse(content={"error": "Não foi possível extrair Mês/Ano do documento."}, status_code=400)
         
         if not all_table_rows:
-            return JSONResponse(content={"error": "Nenhuma tabela de escala principal encontrada."}, status_code=400)
+            return JSONResponse(content={"error": "Nenhuma tabela encontrada no PDF."}, status_code=400)
             
-        header_row = all_table_rows[0]
+        # --- LÓGICA DE DETECÇÃO DE CABEÇALHO APRIMORADA ---
+        header_row, header_index = None, -1
+        for i, row in enumerate(all_table_rows):
+            # Procura a string "NOME COMPLETO" em qualquer célula da linha
+            if row and any("NOME COMPLETO" in str(cell).upper().replace('\n', ' ') for cell in row):
+                header_row = row
+                header_index = i
+                break
+
+        if not header_row:
+            return JSONResponse(content={"error": "Nenhuma tabela de escala principal encontrada (cabeçalho não localizado)."}, status_code=400)
+            
         col_map = {str(name).replace('\n', ' '): i for i, name in enumerate(header_row) if name}
         if "CONSELHO DE CLASSE" in col_map: col_map["CRM"] = col_map["CONSELHO DE CLASSE"]
             
@@ -188,7 +195,8 @@ async def normaliza_escala_from_pdf(request: Request):
         last_professional_name = None
         nome_idx = col_map.get("NOME COMPLETO")
 
-        for row in all_table_rows[1:]:
+        # Processa a partir da linha seguinte ao cabeçalho encontrado
+        for row in all_table_rows[header_index + 1:]:
             if not any(v for v in row if v is not None and str(v).strip() != ''): continue
             
             nome_bruto = row[nome_idx] if nome_idx is not None and nome_idx < len(row) and row[nome_idx] else None
@@ -200,8 +208,8 @@ async def normaliza_escala_from_pdf(request: Request):
             info = profissionais_data[last_professional_name]["info"]
             if not info:
                 info["medico_nome"] = last_professional_name
-                info["cargo"] = row[col_map.get("CARGO")] if "CARGO" in col_map else "N/I"
-                info["vinculo"] = row[col_map.get("VÍNCULO")] if "VÍNCULO" in col_map else "N/I"
+                info["cargo"] = row[col_map.get("CARGO")] if "CARGO" in col_map and col_map.get("CARGO") < len(row) else "N/I"
+                info["vinculo"] = row[col_map.get("VÍNCULO")] if "VÍNCULO" in col_map and col_map.get("VÍNCULO") < len(row) else "N/I"
                 crm_val = row[col_map.get("CRM")] if "CRM" in col_map and col_map.get("CRM") < len(row) else None
                 info["crm"] = str(crm_val).strip() if crm_val else "N/I"
 
