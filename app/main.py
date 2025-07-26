@@ -219,61 +219,66 @@ async def normaliza_escala(request: Request):
         # Extrai metadados
         metadados = extrair_metadados_do_json(body)
         
-        # Agrupa dados por profissional usando a lógica do código original
-        profissionais_data = defaultdict(lambda: {"info": {}, "plantoes_brutos": defaultdict(list)})
-        last_professional_name = None
+        # Processa cada linha individualmente (cada linha = um profissional)
+        profissionais_data = []
         
         for item in body:
             if not isinstance(item, dict) or "row" not in item:
                 continue
                 
             row = item["row"]
-            if not row or not isinstance(row, list):
+            if not row or not isinstance(row, list) or len(row) < 7:
                 continue
             
             # Verifica se é uma linha de profissional válida
-            if is_valid_professional_row(row, 0):
-                last_professional_name = str(row[0]).replace('\n', ' ').strip()
-            
-            if not last_professional_name:
+            if not is_valid_professional_row(row, 0):
                 continue
             
-            # Coleta informações do profissional (similar ao código original)
-            info = profissionais_data[last_professional_name]["info"]
-            if not info:
-                info["medico_nome"] = last_professional_name
-                info["cargo"] = str(row[1]).strip() if len(row) > 1 and row[1] else "N/I"
-                info["vinculo"] = str(row[3]).strip() if len(row) > 3 and row[3] else "N/I"
-                crm_val = str(row[2]).strip() if len(row) > 2 and row[2] else "N/I"
-                info["crm"] = crm_val
-                profissionais_data[last_professional_name]["info"] = info
+            # Extrai informações do profissional de cada linha
+            nome = str(row[0]).replace('\n', ' ').strip()
+            cargo = str(row[1]).strip() if len(row) > 1 and row[1] else "N/I"
+            crm = str(row[2]).strip() if len(row) > 2 and row[2] else "N/I"
+            vinculo = str(row[3]).strip() if len(row) > 3 and row[3] else "N/I"
             
             # Coleta plantões das posições 7+ (dias do mês)
+            plantoes_brutos = defaultdict(list)
             for dia in range(1, 32):
                 col_idx = dia + 6  # Offset: 0-6 são metadados, 7+ são dias
                 if col_idx < len(row) and row[col_idx]:
                     token_plantao = str(row[col_idx]).strip()
-                    if token_plantao:
-                        profissionais_data[last_professional_name]["plantoes_brutos"][dia].append(token_plantao)
+                    if token_plantao and token_plantao.lower() not in ['null', 'none', '']:
+                        plantoes_brutos[dia].append(token_plantao)
+            
+            # Adiciona à lista se tem plantões
+            if plantoes_brutos:
+                profissionais_data.append({
+                    "info": {
+                        "medico_nome": nome,
+                        "cargo": cargo,
+                        "crm": crm,
+                        "vinculo": vinculo
+                    },
+                    "plantoes_brutos": plantoes_brutos
+                })
         
-        # Monta JSON final com lógica de turnos (similar ao código original)
+        # Monta JSON final com lógica de turnos
         lista_profissionais_final = []
         
-        for nome, data in profissionais_data.items():
-            if not data["plantoes_brutos"]:
-                continue
+        for prof_data in profissionais_data:
+            info = prof_data["info"]
+            plantoes_brutos = prof_data["plantoes_brutos"]
             
             profissional_obj = {
-                "medico_nome": data["info"]["medico_nome"].upper(),
-                "medico_crm": f"CRM: {data['info']['crm']}" if not str(data['info']['crm']).startswith("CRM") else data["info"]["crm"],
-                "medico_especialidade": data["info"]["cargo"].upper(),
-                "medico_vinculo": data["info"]["vinculo"].upper(),
+                "medico_nome": info["medico_nome"].upper(),
+                "medico_crm": f"CRM: {info['crm']}" if not str(info['crm']).startswith("CRM") else info["crm"],
+                "medico_especialidade": info["cargo"].upper(),
+                "medico_vinculo": info["vinculo"].upper(),
                 "medico_setor": metadados["setor"].upper(),
                 "plantoes": []
             }
             
             # Processa plantões por dia
-            for dia, tokens in sorted(data["plantoes_brutos"].items()):
+            for dia, tokens in sorted(plantoes_brutos.items()):
                 for token in set(tokens):  # Remove duplicatas
                     turnos = interpretar_turno(token, metadados["setor"])
                     
