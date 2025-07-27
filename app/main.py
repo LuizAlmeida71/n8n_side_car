@@ -98,11 +98,10 @@ MONTH_MAP = {
 HORARIOS_TURNO = {
     "MANHÃ": {"inicio": "07:00", "fim": "13:00"},
     "TARDE": {"inicio": "13:00", "fim": "19:00"},
-    "NOITE": {"inicio": "19:00", "fim": "07:00"},
     "NOITE (início)": {"inicio": "19:00", "fim": "01:00"},
-    "NOITE (fim)": {"inicio": "01:00", "fim": "07:00"}
+    "NOITE (fim)": {"inicio": "01:00", "fim": "07:00"},
 }
-SETORES_NOITE_COMPLETA = ["UTI", "TERAPIA INTENSIVA"]
+SETORES_NOITE_COMPLETA = ["UTI", "TERAPIA INTENSIVA"]  # Agora não interfere, só referência
 
 def parse_mes_ano(text):
     match = re.search(r'MÊS[\s/:]*([A-ZÇÃ]+)[\s/]*(\d{4})', text.upper())
@@ -114,28 +113,23 @@ def parse_mes_ano(text):
 
 def interpretar_turno(token, medico_setor):
     if not token or not isinstance(token, str): return []
-    token_upper = token.upper().replace('\n', '').replace('/', '').replace(' ', '')
-    if "N1N2" in token_upper: return [{"turno": "NOITE"}]
-    if "MTN" in token_upper: tokens = ["M", "T", "N"]
-    elif "DN" in token_upper: tokens = ["D", "N"]
-    elif "M/T" in token_upper or "MT" in token_upper: tokens = ["M", "T"]
-    elif "T/N" in token_upper or "TN" in token_upper: tokens = ["T", "N"]
-    elif "M/N" in token_upper or "MN" in token_upper: tokens = ["M", "N"]
-    else: tokens = re.findall(r'[MTNDC]', token_upper)
+    token_clean = token.replace('\n', '').replace('/', '').replace(' ', '')
+    tokens = []
+    # Se contém ambas N e n, trata cada caso (mas na prática normalmente é só um ou outro por célula)
+    tokens.extend(list(token_clean))
     turnos_finais = []
-    for t in list(dict.fromkeys(tokens)):
+    for t in tokens:
         if t == 'M': turnos_finais.append({"turno": "MANHÃ"})
         elif t == 'T': turnos_finais.append({"turno": "TARDE"})
         elif t == 'D':
             turnos_finais.append({"turno": "MANHÃ"})
             turnos_finais.append({"turno": "TARDE"})
-        elif t in ['N', 'C']:
-            is_noite_completa = any(s in medico_setor.upper() for s in SETORES_NOITE_COMPLETA)
-            if is_noite_completa:
-                turnos_finais.append({"turno": "NOITE"})
-            else:
-                turnos_finais.append({"turno": "NOITE (início)"})
-                turnos_finais.append({"turno": "NOITE (fim)"})
+        elif t == 'N':  # Maiúsculo
+            turnos_finais.append({"turno": "NOITE (início)"})
+            turnos_finais.append({"turno": "NOITE (fim)"})
+        elif t == 'n':  # Minúsculo
+            turnos_finais.append({"turno": "NOITE (início)"})
+        # Se usar outros tokens, tratar aqui
     return turnos_finais
 
 def is_valid_professional_name(name):
@@ -291,7 +285,7 @@ async def normaliza_escala_from_pdf(request: Request):
                             data_plantao += timedelta(days=1)
                         horarios = HORARIOS_TURNO.get(turno_info["turno"], {})
                         profissional_obj["plantoes"].append({
-                            "dia": dia,
+                            "dia": data_plantao.day,
                             "data": data_plantao.strftime('%d/%m/%Y'),
                             "turno": turno_info["turno"],
                             "inicio": horarios.get("inicio"),
