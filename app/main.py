@@ -9,6 +9,7 @@ from fpdf import FPDF
 import traceback
 from collections import defaultdict
 import re
+import traceback
 from datetime import datetime, timedelta
 import textwrap
 from fpdf import FPDF
@@ -95,13 +96,14 @@ MONTH_MAP = {
     'NOVEMBRO': 11, 'DEZEMBRO': 12
 }
 HORARIOS_TURNO = {
-    "MANHÃ": {"inicio": "07:00", "fim": "13:00"}, "TARDE": {"inicio": "13:00", "fim": "19:00"},
-    "NOITE": {"inicio": "19:00", "fim": "07:00"}, "NOITE (início)": {"inicio": "19:00", "fim": "01:00"},
+    "MANHÃ": {"inicio": "07:00", "fim": "13:00"},
+    "TARDE": {"inicio": "13:00", "fim": "19:00"},
+    "NOITE": {"inicio": "19:00", "fim": "07:00"},
+    "NOITE (início)": {"inicio": "19:00", "fim": "01:00"},
     "NOITE (fim)": {"inicio": "01:00", "fim": "07:00"}
 }
 SETORES_NOITE_COMPLETA = ["UTI", "TERAPIA INTENSIVA"]
 
-# --- FUNÇÕES AUXILIARES ---
 def parse_mes_ano(text):
     match = re.search(r'MÊS[\s/:]*([A-ZÇÃ]+)[\s/]*(\d{4})', text.upper())
     if not match: return None, None
@@ -124,11 +126,11 @@ def interpretar_turno(token, medico_setor):
     for t in list(dict.fromkeys(tokens)):
         if t == 'M': turnos_finais.append({"turno": "MANHÃ"})
         elif t == 'T': turnos_finais.append({"turno": "TARDE"})
-        elif t == 'D': 
+        elif t == 'D':
             turnos_finais.append({"turno": "MANHÃ"})
             turnos_finais.append({"turno": "TARDE"})
         elif t in ['N', 'C']:
-            is_noite_completa = any(s in (medico_setor or "").upper() for s in SETORES_NOITE_COMPLETA)
+            is_noite_completa = any(s in medico_setor.upper() for s in SETORES_NOITE_COMPLETA)
             if is_noite_completa:
                 turnos_finais.append({"turno": "NOITE"})
             else:
@@ -141,122 +143,173 @@ def is_valid_professional_name(name):
     name_upper = name.strip().upper()
     ignored = ["NOME COMPLETO", "LEGENDA", "ASSINATURA", "ASSINADO", "COMPLETO", "CARGO", "MATRÍCULA"]
     if any(keyword in name_upper for keyword in ignored): return False
-    return len(name.split()) >= 2
+    return len(name.split()) >= 2 or name.isupper()
 
-# --- ENDPOINT PRINCIPAL ---
+def dedup_plantao(lista):
+    # Remove plantões duplicados por (dia, turno, inicio, fim)
+    seen = set()
+    result = []
+    for p in lista:
+        key = (p["dia"], p["turno"], p["inicio"], p["fim"])
+        if key not in seen:
+            seen.add(key)
+            result.append(p)
+    return result
+
 @app.post("/normaliza-escala-from-pdf")
 async def normaliza_escala_from_pdf(request: Request):
     try:
         body = await request.json()
-        
         full_text, all_table_rows = "", []
-        for page_data in body:
+        last_header_row = None
+        last_col_map = None
+        last_setor = None
+        last_unidade = None
+        last_mes, last_ano = None, None
+
+        # --- EXTRAÇÃO DE DADOS DE TODAS AS PÁGINAS ---
+        for page_idx, page_data in enumerate(body):
             b64_data = page_data.get("bae64")
             if not b64_data: continue
             pdf_bytes = base64.b64decode(b64_data)
             with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
                 page = doc[0]
-                full_text += page.get_text("text") + "\n"
+                page_text = page.get_text("text")
+                full_text += page_text + "\n"
+                # Extrai tabelas desta página
                 for table in page.find_tables():
                     extracted = table.extract()
                     if extracted: all_table_rows.extend(extracted)
-        
-        unidade_match = re.search(r'UNIDADE:\s*(.*?)\n', full_text, re.IGNORECASE)
-        setor_match = re.search(r'UNIDADE SETOR:\s*(.*?)\n', full_text, re.IGNORECASE)
-        mes, ano = parse_mes_ano(full_text)
-        
-        unidade = unidade_match.group(1).strip() if unidade_match else "NÃO INFORMADO"
-        setor = setor_match.group(1).strip() if setor_match else "NÃO INFORMADO"
-        
-        if mes is None or ano is None:
+
+            # Atualiza cabeçalho apenas se encontrado nesta página
+            unidade_match = re.search(r'UNIDADE:\s*(.*?)\n', page_text, re.IGNORECASE)
+            setor_match = re.search(r'UNIDADE[\s/_\-]*SETOR:\s*(.*?)\n', page_text, re.IGNORECASE)
+            mes, ano = parse_mes_ano(page_text)
+
+            unidade = unidade_match.group(1).strip() if unidade_match else last_unidade
+            setor = setor_match.group(1).strip() if setor_match else last_setor
+            if mes is None: mes = last_mes
+            if ano is None: ano = last_ano
+
+            if unidade: last_unidade = unidade
+            if setor: last_setor = setor
+            if mes: last_mes = mes
+            if ano: last_ano = ano
+
+        # Validação do mês/ano final
+        if last_mes is None or last_ano is None:
             return JSONResponse(content={"error": "Mês/Ano não encontrados."}, status_code=400)
-        
+
+        # --- BUSCA DO CABEÇALHO PRINCIPAL (LINHA COM NOME COMPLETO ETC) ---
         header_row, header_index = None, -1
         for i, row in enumerate(all_table_rows):
             if row and any("NOME" in str(cell).upper() and "COMPLETO" in str(cell).upper() for cell in row):
                 header_row = row
                 header_index = i
                 break
-        
-        if not header_row:
-            return JSONResponse(content={"error": "Cabeçalho da escala (linha com 'NOME COMPLETO') não encontrado."}, status_code=400)
 
-        # --- MAPEAMENTO DE COLUNA ROBUSTO ---
+        if not header_row:
+            # Não encontrou cabeçalho, mas é possível que seja continuação: usa o anterior
+            if last_header_row is not None:
+                header_row = last_header_row
+                header_index = -1
+            else:
+                return JSONResponse(content={"error": "Cabeçalho da escala não encontrado."}, status_code=400)
+        else:
+            last_header_row = header_row
+
+        # ---- MAPEAMENTO DE COLUNAS ROBUSTO ----
         col_map = {}
         for i, col_name in enumerate(header_row):
             if not col_name: continue
-            clean_name = str(col_name).upper().replace('\n', ' ')
-            if "NOME COMPLETO" in clean_name: col_map["_NOME_"] = i
-            elif "CARGO" in clean_name: col_map["_CARGO_"] = i
-            elif "VÍNCULO" in clean_name: col_map["_VINCULO_"] = i
-            elif "CONSELHO" in clean_name or "CRM" in clean_name: col_map["_CRM_"] = i
-            else:
-                try: col_map[int(col_name)] = i
-                except: continue
-        
-        nome_idx = col_map.get("_NOME_")
+            clean_name = str(col_name).replace('\n', ' ').strip().upper()
+            if "NOME COMPLETO" in clean_name: col_map["NOME COMPLETO"] = i
+            elif "CARGO" in clean_name: col_map["CARGO"] = i
+            elif "VÍNCULO" in clean_name or "VINCULO" in clean_name: col_map["VÍNCULO"] = i
+            elif "CONSELHO" in clean_name or "CRM" in clean_name: col_map["CRM"] = i
+            elif isinstance(col_name, (int, float)) or (col_name.isdigit() if isinstance(col_name, str) else False):
+                 col_map[int(col_name)] = i
+
+        nome_idx = col_map.get("NOME COMPLETO")
         if nome_idx is None:
             return JSONResponse(content={"error": "Coluna 'NOME COMPLETO' não pode ser mapeada no cabeçalho."}, status_code=400)
-        
-        cleaned_rows, last_name = [], None
-        for row in all_table_rows[header_index + 1:]:
+
+        # --- DESFAZENDO MERGE E CONCATENANDO NOMES QUEBRADOS ---
+        cleaned_rows = []
+        last_name = None
+        for row in all_table_rows[header_index + 1:] if header_index != -1 else all_table_rows:
             if not row or len(row) <= nome_idx: continue
             nome_bruto = row[nome_idx]
+            # Buffer inteligente para nomes quebrados
             if nome_bruto and is_valid_professional_name(nome_bruto):
-                last_name = nome_bruto.replace('\n', ' ').strip()
+                if last_name and len(nome_bruto.strip().split()) == 1:
+                    last_name = f"{last_name} {nome_bruto.strip()}"
+                else:
+                    last_name = nome_bruto.replace('\n', ' ').strip()
+            elif nome_bruto and last_name and len(nome_bruto.strip().split()) == 1:
+                last_name = f"{last_name} {nome_bruto.strip()}"
             if last_name:
                 new_row = list(row)
                 new_row[nome_idx] = last_name
                 cleaned_rows.append(new_row)
 
-        profissionais_data = defaultdict(list)
+        profissionais_data = defaultdict(lambda: {"info_rows": []})
         for row in cleaned_rows:
             nome = row[nome_idx]
-            profissionais_data[nome].append(row)
+            profissionais_data[nome]["info_rows"].append(row)
 
+        # --- MONTAGEM DA SAÍDA FINAL ---
         lista_profissionais_final = []
-        for nome, info_rows in profissionais_data.items():
+        for nome, data in profissionais_data.items():
+            info_rows = data["info_rows"]
             primeira_linha = info_rows[0]
-            
+
             profissional_obj = {
                 "medico_nome": nome,
-                "medico_crm": str(primeira_linha[col_map.get("_CRM_")]).strip() if col_map.get("_CRM_") and col_map.get("_CRM_") < len(primeira_linha) and primeira_linha[col_map.get("_CRM_")] else "N/I",
-                "medico_especialidade": str(primeira_linha[col_map.get("_CARGO_")]).strip() if col_map.get("_CARGO_") and col_map.get("_CARGO_") < len(primeira_linha) else "N/I",
-                "medico_vinculo": str(primeira_linha[col_map.get("_VINCULO_")]).strip() if col_map.get("_VINCULO_") and col_map.get("_VINCULO_") < len(primeira_linha) else "N/I",
-                "medico_setor": setor, "plantoes": []
+                "medico_crm": str(primeira_linha[col_map.get("CRM")]).strip() if col_map.get("CRM") and col_map.get("CRM") < len(primeira_linha) and primeira_linha[col_map.get("CRM")] else "N/I",
+                "medico_especialidade": str(primeira_linha[col_map.get("CARGO")]).strip() if col_map.get("CARGO") and col_map.get("CARGO") < len(primeira_linha) else "N/I",
+                "medico_vinculo": str(primeira_linha[col_map.get("VÍNCULO")]).strip() if col_map.get("VÍNCULO") and col_map.get("VÍNCULO") < len(primeira_linha) else "N/I",
+                "medico_setor": last_setor or "NÃO INFORMADO",
+                "plantoes": []
             }
-            
+
             plantoes_brutos = defaultdict(list)
             for row in info_rows:
                 for dia, col_idx in col_map.items():
                     if isinstance(dia, int):
-                        if col_idx < len(row) and row[col_idx]:
-                            plantoes_brutos[dia].append(str(row[col_idx]))
-            
+                        if col_idx < len(row) and row[col_idx] and str(row[col_idx]).strip():
+                            plantoes_brutos[dia].append(str(row[col_idx]).strip())
+                        # Não adiciona nada se a célula está vazia!
+
             for dia, tokens in sorted(plantoes_brutos.items()):
-                for token in set(tokens):
-                    turnos = interpretar_turno(token, setor)
+                # Para cada token (pode ter mais de um por dia, linha), processa
+                for token in tokens:
+                    turnos = interpretar_turno(token, last_setor or "")
                     for turno_info in turnos:
-                        data_plantao = datetime(ano, mes, dia)
+                        data_plantao = datetime(last_ano, last_mes, dia)
                         if turno_info["turno"] == "NOITE (fim)":
                             data_plantao += timedelta(days=1)
                         horarios = HORARIOS_TURNO.get(turno_info["turno"], {})
                         profissional_obj["plantoes"].append({
-                            "dia": dia, "data": data_plantao.strftime('%d/%m/%Y'),
-                            "turno": turno_info["turno"], "inicio": horarios.get("inicio"), "fim": horarios.get("fim")
+                            "dia": dia,
+                            "data": data_plantao.strftime('%d/%m/%Y'),
+                            "turno": turno_info["turno"],
+                            "inicio": horarios.get("inicio"),
+                            "fim": horarios.get("fim")
                         })
-            
+
+            profissional_obj["plantoes"] = dedup_plantao(profissional_obj["plantoes"])
             if profissional_obj["plantoes"]:
                 profissional_obj["plantoes"].sort(key=lambda p: (p["dia"], p["inicio"] or ""))
                 lista_profissionais_final.append(profissional_obj)
-        
-        mes_nome_str = list(MONTH_MAP.keys())[list(MONTH_MAP.values()).index(mes)]
+
+        mes_nome_str = list(MONTH_MAP.keys())[list(MONTH_MAP.values()).index(last_mes)]
         final_output = [{
-            "unidade_escala": unidade,
-            "mes_ano_escala": f"{mes_nome_str}/{ano}",
+            "unidade_escala": last_unidade or "NÃO INFORMADO",
+            "mes_ano_escala": f"{mes_nome_str}/{last_ano}",
             "profissionais": lista_profissionais_final
         }]
-        
+
         return JSONResponse(content=final_output)
 
     except Exception as e:
