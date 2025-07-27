@@ -248,7 +248,7 @@ async def normaliza_escala_from_pdf(request: Request):
                 
                 for dia, tokens in sorted(plantoes_brutos.items()):
                     for token in set(tokens):
-                        turnos = interpretar_turno(token)
+                        turnos = interpretar_turno(token, setor)
                         for turno_info in turnos:
                             data_plantao = datetime(scale["ano"], scale["mes"], dia)
                             if turno_info["turno"] == "NOITE (fim)":
