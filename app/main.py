@@ -120,9 +120,11 @@ def interpretar_turno(token, medico_setor):
             turnos_finais.append({"turno": "MANHÃ"})
             turnos_finais.append({"turno": "TARDE"})
         elif t == 'N':
+            # Sempre N maiúsculo: duas partes
             turnos_finais.append({"turno": "NOITE (início)"})
             turnos_finais.append({"turno": "NOITE (fim)"})
         elif t == 'n':
+            # n minúsculo: apenas início
             turnos_finais.append({"turno": "NOITE (início)"})
     return turnos_finais
 
@@ -188,6 +190,8 @@ async def normaliza_escala_from_pdf(request: Request):
         header_map = None
         nome_idx = None
         idx_linha = 0
+        last_name = None   # <-- Inicializa aqui!
+
         while idx_linha < len(all_table_rows):
             row = all_table_rows[idx_linha]
             if row and any("NOME" in str(cell).upper() and "COMPLETO" in str(cell).upper() for cell in row):
@@ -205,9 +209,10 @@ async def normaliza_escala_from_pdf(request: Request):
                     elif isinstance(col_name, (int, float)) or (str(col_name).isdigit() if col_name else False):
                         header_map[int(col_name)] = i+start
                 nome_idx = header_map.get("NOME COMPLETO")
+                last_name = None   # <-- Reset após cada cabeçalho novo!
                 idx_linha += 1
                 continue
-            # Pula linhas até um cabeçalho ser definido
+
             if not header_map or nome_idx is None:
                 idx_linha += 1
                 continue
@@ -219,13 +224,13 @@ async def normaliza_escala_from_pdf(request: Request):
             if not row or len(row) <= nome_idx:
                 idx_linha += 1
                 continue
+
             nome_bruto = row[nome_idx]
-            # Corrige quebra de nome
             if nome_bruto and is_valid_professional_name(nome_bruto):
                 last_name = nome_bruto.replace('\n', ' ').strip()
-            elif nome_bruto and last_name and len(nome_bruto.strip().split()) == 1:
+            elif nome_bruto and last_name is not None and len(nome_bruto.strip().split()) == 1:
                 last_name = f"{last_name} {nome_bruto.strip()}"
-            if last_name:
+            if last_name is not None:
                 new_row = list(row)
                 new_row[nome_idx] = last_name
                 profissionais_data[last_name]["info_rows"].append(new_row)
