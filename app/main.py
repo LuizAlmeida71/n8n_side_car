@@ -166,80 +166,76 @@ async def normaliza_escala_from_pdf(request: Request):
         mes, ano = parse_mes_ano(full_text)
         
         unidade = unidade_match.group(1).strip() if unidade_match else "NÃO INFORMADO"
-        setor_global = setor_match.group(1).strip() if setor_match else "NÃO INFORMADO"
+        setor = setor_match.group(1).strip() if setor_match else "NÃO INFORMADO"
         
         if mes is None or ano is None:
             return JSONResponse(content={"error": "Mês/Ano não encontrados."}, status_code=400)
         
         header_row, header_index = None, -1
         for i, row in enumerate(all_table_rows):
-            if row and any("NOME COMPLETO" in str(cell).upper().replace('\n', ' ') for cell in row):
+            if row and any("NOME" in str(cell).upper() and "COMPLETO" in str(cell).upper() for cell in row):
                 header_row = row
                 header_index = i
                 break
         
         if not header_row:
-            return JSONResponse(content={"error": "Cabeçalho da escala não encontrado."}, status_code=400)
+            return JSONResponse(content={"error": "Cabeçalho da escala (linha com 'NOME COMPLETO') não encontrado."}, status_code=400)
 
-        col_map = {str(name).replace('\n', ' '): i for i, name in enumerate(header_row) if name}
-        if "CONSELHO DE CLASSE" in col_map: col_map["CRM"] = col_map["CONSELHO DE CLASSE"]
+        # --- MAPEAMENTO DE COLUNA ROBUSTO ---
+        col_map = {}
+        for i, col_name in enumerate(header_row):
+            if not col_name: continue
+            clean_name = str(col_name).upper().replace('\n', ' ')
+            if "NOME COMPLETO" in clean_name: col_map["_NOME_"] = i
+            elif "CARGO" in clean_name: col_map["_CARGO_"] = i
+            elif "VÍNCULO" in clean_name: col_map["_VINCULO_"] = i
+            elif "CONSELHO" in clean_name or "CRM" in clean_name: col_map["_CRM_"] = i
+            else:
+                try: col_map[int(col_name)] = i
+                except: continue
         
-        cleaned_rows = []
-        last_name = None
-        nome_idx = col_map.get("NOME COMPLETO")
-        
+        nome_idx = col_map.get("_NOME_")
         if nome_idx is None:
-            return JSONResponse(content={"error": "Coluna 'NOME COMPLETO' não encontrada no cabeçalho."}, status_code=400)
+            return JSONResponse(content={"error": "Coluna 'NOME COMPLETO' não pode ser mapeada no cabeçalho."}, status_code=400)
         
+        cleaned_rows, last_name = [], None
         for row in all_table_rows[header_index + 1:]:
             if not row or len(row) <= nome_idx: continue
-            
             nome_bruto = row[nome_idx]
             if nome_bruto and is_valid_professional_name(nome_bruto):
                 last_name = nome_bruto.replace('\n', ' ').strip()
-            
             if last_name:
                 new_row = list(row)
                 new_row[nome_idx] = last_name
                 cleaned_rows.append(new_row)
 
-        profissionais_data = defaultdict(lambda: {"info_rows": []})
+        profissionais_data = defaultdict(list)
         for row in cleaned_rows:
             nome = row[nome_idx]
-            profissionais_data[nome]["info_rows"].append(row)
+            profissionais_data[nome].append(row)
 
         lista_profissionais_final = []
-        for nome, data in profissionais_data.items():
-            info_rows = data["info_rows"]
+        for nome, info_rows in profissionais_data.items():
             primeira_linha = info_rows[0]
             
-            # --- CORREÇÃO DO BUG ---
-            # Define o setor a ser usado para este profissional
-            medico_setor = setor_global 
-            # ---------------------
-
             profissional_obj = {
                 "medico_nome": nome,
-                "medico_crm": str(primeira_linha[col_map.get("CRM")]).strip() if col_map.get("CRM") and col_map.get("CRM") < len(primeira_linha) and primeira_linha[col_map.get("CRM")] else "N/I",
-                "medico_especialidade": str(primeira_linha[col_map.get("CARGO")]).strip() if col_map.get("CARGO") and col_map.get("CARGO") < len(primeira_linha) else "N/I",
-                "medico_vinculo": str(primeira_linha[col_map.get("VÍNCULO")]).strip() if col_map.get("VÍNCULO") and col_map.get("VÍNCULO") < len(primeira_linha) else "N/I",
-                "medico_setor": medico_setor, "plantoes": []
+                "medico_crm": str(primeira_linha[col_map.get("_CRM_")]).strip() if col_map.get("_CRM_") and col_map.get("_CRM_") < len(primeira_linha) and primeira_linha[col_map.get("_CRM_")] else "N/I",
+                "medico_especialidade": str(primeira_linha[col_map.get("_CARGO_")]).strip() if col_map.get("_CARGO_") and col_map.get("_CARGO_") < len(primeira_linha) else "N/I",
+                "medico_vinculo": str(primeira_linha[col_map.get("_VINCULO_")]).strip() if col_map.get("_VINCULO_") and col_map.get("_VINCULO_") < len(primeira_linha) else "N/I",
+                "medico_setor": setor, "plantoes": []
             }
             
             plantoes_brutos = defaultdict(list)
             for row in info_rows:
-                for dia_str, col_idx in col_map.items():
-                    try:
-                        dia = int(dia_str)
+                for dia, col_idx in col_map.items():
+                    if isinstance(dia, int):
                         if col_idx < len(row) and row[col_idx]:
                             plantoes_brutos[dia].append(str(row[col_idx]))
-                    except (ValueError, TypeError): continue
             
             for dia, tokens in sorted(plantoes_brutos.items()):
                 for token in set(tokens):
-                    # --- CORREÇÃO DO BUG ---
-                    turnos = interpretar_turno(token, medico_setor)
-                    # ---------------------
+                    turnos = interpretar_turno(token, setor)
                     for turno_info in turnos:
                         data_plantao = datetime(ano, mes, dia)
                         if turno_info["turno"] == "NOITE (fim)":
