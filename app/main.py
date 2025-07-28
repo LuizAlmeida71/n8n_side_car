@@ -94,12 +94,14 @@ MONTH_MAP = {
     'JUNHO': 6, 'JULHO': 7, 'AGOSTO': 8, 'SETEMBRO': 9, 'OUTUBRO': 10,
     'NOVEMBRO': 11, 'DEZEMBRO': 12
 }
+
 HORARIOS_TURNO = {
     "MANHÃ": {"inicio": "07:00", "fim": "13:00"},
     "TARDE": {"inicio": "13:00", "fim": "19:00"},
     "NOITE (início)": {"inicio": "19:00", "fim": "01:00"},
     "NOITE (fim)": {"inicio": "01:00", "fim": "07:00"},
 }
+
 def parse_mes_ano(text):
     match = re.search(r'MÊS[\s/:]*([A-ZÇÃ]+)[\s/]*(\d{4})', text.upper())
     if not match: return None, None
@@ -120,11 +122,9 @@ def interpretar_turno(token, medico_setor):
             turnos_finais.append({"turno": "MANHÃ"})
             turnos_finais.append({"turno": "TARDE"})
         elif t == 'N':
-            # Sempre N maiúsculo: duas partes
             turnos_finais.append({"turno": "NOITE (início)"})
             turnos_finais.append({"turno": "NOITE (fim)"})
         elif t == 'n':
-            # n minúsculo: apenas início
             turnos_finais.append({"turno": "NOITE (início)"})
     return turnos_finais
 
@@ -155,7 +155,6 @@ async def normaliza_escala_from_pdf(request: Request):
         last_unidade = None
         last_mes, last_ano = None, None
 
-        # EXTRAÇÃO DE DADOS DE TODAS AS PÁGINAS
         for page_idx, page_data in enumerate(body):
             b64_data = page_data.get("bae64")
             if not b64_data: continue
@@ -168,12 +167,16 @@ async def normaliza_escala_from_pdf(request: Request):
                     extracted = table.extract()
                     if extracted: all_table_rows.extend(extracted)
 
-            unidade_match = re.search(r'UNIDADE:\s*(.*?)\n', page_text, re.IGNORECASE)
-            setor_match = re.search(r'UNIDADE[\s/_\-]*SETOR:\s*(.*?)\n', page_text, re.IGNORECASE)
+            # Correções para capturar corretamente unidade e setor mesmo com merge
+            unidade_match = re.search(r'UNIDADE:\s*(.*?)\s{2,}|\s{2,}UNIDADE:\s*(.*?)\n', page_text, re.IGNORECASE)
+            setor_match = re.search(r'UNIDADE[\s/_\-]*SETOR:\s*(.*?)\s{2,}|RESPONSÁVEL[\s/_\-]*TÉCNICO:\s*(.*?)\n', page_text, re.IGNORECASE)
+
             mes, ano = parse_mes_ano(page_text)
 
-            unidade = unidade_match.group(1).strip() if unidade_match else last_unidade
-            setor = setor_match.group(1).strip() if setor_match else last_setor
+            unidade = (unidade_match.group(1) or unidade_match.group(2)).strip() if unidade_match else last_unidade
+            setor_raw = (setor_match.group(1) or setor_match.group(2)).strip() if setor_match else ""
+            setor = setor_raw.replace("RESPONSÁVEL TÉCNICO", "").strip(" -:/") if setor_raw else last_setor
+
             if mes is None: mes = last_mes
             if ano is None: ano = last_ano
 
@@ -185,17 +188,15 @@ async def normaliza_escala_from_pdf(request: Request):
         if last_mes is None or last_ano is None:
             return JSONResponse(content={"error": "Mês/Ano não encontrados."}, status_code=400)
 
-        # --- PROCESSAMENTO POR BLOCOS DE CABEÇALHO ---
         profissionais_data = defaultdict(lambda: {"info_rows": []})
         header_map = None
         nome_idx = None
         idx_linha = 0
-        last_name = None   # <-- Inicializa aqui!
+        last_name = None
 
         while idx_linha < len(all_table_rows):
             row = all_table_rows[idx_linha]
             if row and any("NOME" in str(cell).upper() and "COMPLETO" in str(cell).upper() for cell in row):
-                # Detecta e ajusta offset se a primeira coluna for índice
                 first_is_index = (not row[0] or str(row[0]).strip().isdigit())
                 start = 1 if first_is_index else 0
                 header_row = row[start:]
@@ -209,7 +210,7 @@ async def normaliza_escala_from_pdf(request: Request):
                     elif isinstance(col_name, (int, float)) or (str(col_name).isdigit() if col_name else False):
                         header_map[int(col_name)] = i+start
                 nome_idx = header_map.get("NOME COMPLETO")
-                last_name = None   # <-- Reset após cada cabeçalho novo!
+                last_name = None
                 idx_linha += 1
                 continue
 
@@ -218,7 +219,6 @@ async def normaliza_escala_from_pdf(request: Request):
                 continue
 
             row = all_table_rows[idx_linha]
-            # Corrige se a primeira coluna é índice
             if row and (not row[0] or str(row[0]).strip().isdigit()):
                 row = row[1:]
             if not row or len(row) <= nome_idx:
@@ -278,6 +278,7 @@ async def normaliza_escala_from_pdf(request: Request):
                                 "inicio": horarios.get("inicio"),
                                 "fim": horarios.get("fim")
                             })
+
             profissional_obj["plantoes"] = dedup_plantao(profissional_obj["plantoes"])
             if profissional_obj["plantoes"]:
                 profissional_obj["plantoes"].sort(key=lambda p: (p["dia"], p["inicio"] or ""))
