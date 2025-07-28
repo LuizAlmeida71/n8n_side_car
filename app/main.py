@@ -109,14 +109,17 @@ def parse_mes_ano(text):
     ano = int(ano_str)
     return mes, ano
 
-def interpretar_turno(token, medico_setor):
-    if not token or not isinstance(token, str): return []
+def interpretar_turno(token):
+    if not token or not isinstance(token, str):
+        return []
     token_clean = token.replace('\n', '').replace('/', '').replace(' ', '')
     tokens = list(token_clean)
     turnos_finais = []
     for t in tokens:
-        if t == 'M': turnos_finais.append({"turno": "MANHÃ"})
-        elif t == 'T': turnos_finais.append({"turno": "TARDE"})
+        if t == 'M':
+            turnos_finais.append({"turno": "MANHÃ"})
+        elif t == 'T':
+            turnos_finais.append({"turno": "TARDE"})
         elif t == 'D':
             turnos_finais.append({"turno": "MANHÃ"})
             turnos_finais.append({"turno": "TARDE"})
@@ -180,9 +183,16 @@ async def normaliza_escala_from_pdf(request: Request):
             if ano is None: ano = last_ano
 
             if unidade: last_unidade = unidade
+            else: unidade = last_unidade
             if setor: last_setor = setor
+            else: setor = last_setor
             if mes: last_mes = mes
             if ano: last_ano = ano
+
+            pagina_unidade_setor_map[page_idx] = {
+            "unidade": unidade,
+            "setor": setor
+            }
 
         if last_mes is None or last_ano is None:
             return JSONResponse(content={"error": "Mês/Ano não encontrados."}, status_code=400)
@@ -244,8 +254,10 @@ async def normaliza_escala_from_pdf(request: Request):
                 "medico_crm": str(primeira_linha[header_map.get("CRM")]).strip() if header_map.get("CRM") and header_map.get("CRM") < len(primeira_linha) and primeira_linha[header_map.get("CRM")] else "N/I",
                 "medico_especialidade": str(primeira_linha[header_map.get("CARGO")]).strip() if header_map.get("CARGO") and header_map.get("CARGO") < len(primeira_linha) else "N/I",
                 "medico_vinculo": str(primeira_linha[header_map.get("VÍNCULO")]).strip() if header_map.get("VÍNCULO") and header_map.get("VÍNCULO") < len(primeira_linha) else "N/I",
-                "medico_setor": last_setor or "NÃO INFORMADO",
+                "medico_setor": pagina_unidade_setor_map.get(pagina_idx_profissional, {}).get("setor", "NÃO INFORMADO"),
                 "plantoes": []
+                }
+
             }
             plantoes_brutos = defaultdict(list)
             for row in info_rows:
