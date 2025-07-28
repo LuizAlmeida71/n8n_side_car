@@ -94,14 +94,12 @@ MONTH_MAP = {
     'JUNHO': 6, 'JULHO': 7, 'AGOSTO': 8, 'SETEMBRO': 9, 'OUTUBRO': 10,
     'NOVEMBRO': 11, 'DEZEMBRO': 12
 }
-
 HORARIOS_TURNO = {
     "MANHÃ": {"inicio": "07:00", "fim": "13:00"},
     "TARDE": {"inicio": "13:00", "fim": "19:00"},
     "NOITE (início)": {"inicio": "19:00", "fim": "01:00"},
     "NOITE (fim)": {"inicio": "01:00", "fim": "07:00"},
 }
-
 def parse_mes_ano(text):
     match = re.search(r'MÊS[\s/:]*([A-ZÇÃ]+)[\s/]*(\d{4})', text.upper())
     if not match: return None, None
@@ -172,18 +170,10 @@ async def normaliza_escala_from_pdf(request: Request):
 
             unidade_match = re.search(r'UNIDADE:\s*(.*?)\n', page_text, re.IGNORECASE)
             setor_match = re.search(r'UNIDADE[\s/_\-]*SETOR:\s*(.*?)\n', page_text, re.IGNORECASE)
-            # Correções para capturar corretamente unidade e setor mesmo com merge
-            unidade_match = re.search(r'UNIDADE:\s*(.*?)\s{2,}|\s{2,}UNIDADE:\s*(.*?)\n', page_text, re.IGNORECASE)
-            setor_match = re.search(r'UNIDADE[\s/_\-]*SETOR:\s*(.*?)\s{2,}|RESPONSÁVEL[\s/_\-]*TÉCNICO:\s*(.*?)\n', page_text, re.IGNORECASE)
-
             mes, ano = parse_mes_ano(page_text)
 
             unidade = unidade_match.group(1).strip() if unidade_match else last_unidade
             setor = setor_match.group(1).strip() if setor_match else last_setor
-            unidade = (unidade_match.group(1) or unidade_match.group(2)).strip() if unidade_match else last_unidade
-            setor_raw = (setor_match.group(1) or setor_match.group(2)).strip() if setor_match else ""
-            setor = setor_raw.replace("RESPONSÁVEL TÉCNICO", "").strip(" -:/") if setor_raw else last_setor
-
             if mes is None: mes = last_mes
             if ano is None: ano = last_ano
 
@@ -201,7 +191,6 @@ async def normaliza_escala_from_pdf(request: Request):
         nome_idx = None
         idx_linha = 0
         last_name = None   # <-- Inicializa aqui!
-        last_name = None
 
         while idx_linha < len(all_table_rows):
             row = all_table_rows[idx_linha]
@@ -221,7 +210,6 @@ async def normaliza_escala_from_pdf(request: Request):
                         header_map[int(col_name)] = i+start
                 nome_idx = header_map.get("NOME COMPLETO")
                 last_name = None   # <-- Reset após cada cabeçalho novo!
-                last_name = None
                 idx_linha += 1
                 continue
 
@@ -290,7 +278,6 @@ async def normaliza_escala_from_pdf(request: Request):
                                 "inicio": horarios.get("inicio"),
                                 "fim": horarios.get("fim")
                             })
-
             profissional_obj["plantoes"] = dedup_plantao(profissional_obj["plantoes"])
             if profissional_obj["plantoes"]:
                 profissional_obj["plantoes"].sort(key=lambda p: (p["dia"], p["inicio"] or ""))
@@ -307,6 +294,50 @@ async def normaliza_escala_from_pdf(request: Request):
 
     except Exception as e:
         return JSONResponse(content={"error": str(e), "trace": traceback.format_exc()}, status_code=500)
+
+# --- FIM normaliza-escala-from-pdf ---
+
+@app.post("/text-to-pdf")
+async def text_to_pdf(request: Request):
+    try:
+        data = await request.json()
+        raw_text = data.get("text", "")
+        filename = data.get("filename", "saida.pdf")
+
+        if not os.path.exists(FONT_PATH):
+            raise RuntimeError(f"Fonte não encontrada em: {FONT_PATH}")
+
+        # Pré-processamento: substitui múltiplos \n e quebras "duplas"
+        clean_text = raw_text.replace("\r", "").replace("\n", " ")
+        clean_text = " ".join(clean_text.split())  # remove múltiplos espaços
+        lines = [clean_text[i:i+120] for i in range(0, len(clean_text), 120)]
+
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_auto_page_break(auto=True, margin=15)
+        pdf.add_font("DejaVu", "", FONT_PATH, uni=True)
+        pdf.set_font("DejaVu", size=10)
+
+        for line in lines:
+            pdf.multi_cell(w=190, h=8, txt=line)
+
+        # CORREÇÃO: Tratamento adequado do output do FPDF
+        pdf_output = pdf.output(dest='S')
+        
+        # Converte para bytes se necessário
+        if isinstance(pdf_output, str):
+            pdf_bytes = pdf_output.encode('latin1')
+        elif isinstance(pdf_output, bytearray):
+            pdf_bytes = bytes(pdf_output)
+        else:
+            pdf_bytes = pdf_output
+        
+        base64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
+
+        return JSONResponse(content={"file_base64": base64_pdf, "filename": filename})
+
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
 
 # --- FIM normaliza-escala-from-pdf ---
 
