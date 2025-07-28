@@ -193,10 +193,17 @@ async def normaliza_escala_from_pdf(request: Request):
             if mes: last_mes = mes
             if ano: last_ano = ano
 
-            pagina_unidade_setor_map[page_idx] = {
-                "unidade": unidade,
-                "setor": setor
-            }
+            # Reset setor and unidade for each new page to avoid carryover
+            if unidade_match or setor_match:
+                pagina_unidade_setor_map[page_idx] = {
+                    "unidade": unidade or last_unidade,
+                    "setor": setor or last_setor
+                }
+            else:
+                pagina_unidade_setor_map[page_idx] = {
+                    "unidade": last_unidade,
+                    "setor": last_setor
+                }
 
         if last_mes is None or last_ano is None:
             return JSONResponse(content={"error": "Mês/Ano não encontrados."}, status_code=400)
@@ -317,7 +324,6 @@ async def normaliza_escala_from_pdf(request: Request):
 
     except Exception as e:
         return JSONResponse(content={"error": str(e), "trace": traceback.format_exc()}, status_code=500)
-
 # --- FIM normaliza-escala-from-pdf ---
 
 @app.post("/text-to-pdf")
