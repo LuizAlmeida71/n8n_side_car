@@ -101,12 +101,13 @@ HORARIOS_TURNO = {
     "NOITE (fim)": {"inicio": "01:00", "fim": "07:00"},
 }
 def parse_mes_ano(text):
-    match = re.search(r'MÊS[\s/:]*([A-ZÇÃ]+)[\s/]*(\d{4})', text.upper())
-    if not match: return None, None
-    mes_nome, ano_str = match.groups()
-    mes = MONTH_MAP.get(mes_nome)
-    ano = int(ano_str)
-    return mes, ano
+    text = text.upper()
+    for nome_mes, numero in MONTH_MAP.items():
+        if nome_mes in text:
+            match = re.search(rf"{nome_mes}[^\d]*(\d{{4}})", text)
+            if match:
+                return numero, int(match.group(1))
+    return None, None
 
 def interpretar_turno(token, medico_setor):
     if not token or not isinstance(token, str): return []
