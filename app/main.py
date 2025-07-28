@@ -88,7 +88,6 @@ async def split_pdf(file: UploadFile = File(...)):
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 # --- INÍCIO normaliza-escala-from-pdf ---
-
 MONTH_MAP = {
     'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
     'JUNHO': 6, 'JULHO': 7, 'AGOSTO': 8, 'SETEMBRO': 9, 'OUTUBRO': 10,
@@ -101,13 +100,12 @@ HORARIOS_TURNO = {
     "NOITE (fim)": {"inicio": "01:00", "fim": "07:00"},
 }
 def parse_mes_ano(text):
-    text = text.upper()
-    for nome_mes, numero in MONTH_MAP.items():
-        if nome_mes in text:
-            match = re.search(rf"{nome_mes}[^\d]*(\d{{4}})", text)
-            if match:
-                return numero, int(match.group(1))
-    return None, None
+    match = re.search(r'MÊS[\s/:]*([A-ZÇÃ]+)[\s/]*(\d{4})', text.upper())
+    if not match: return None, None
+    mes_nome, ano_str = match.groups()
+    mes = MONTH_MAP.get(mes_nome)
+    ano = int(ano_str)
+    return mes, ano
 
 def interpretar_turno(token, medico_setor):
     if not token or not isinstance(token, str): return []
@@ -121,9 +119,11 @@ def interpretar_turno(token, medico_setor):
             turnos_finais.append({"turno": "MANHÃ"})
             turnos_finais.append({"turno": "TARDE"})
         elif t == 'N':
+            # Sempre N maiúsculo: duas partes
             turnos_finais.append({"turno": "NOITE (início)"})
             turnos_finais.append({"turno": "NOITE (fim)"})
         elif t == 'n':
+            # n minúsculo: apenas início
             turnos_finais.append({"turno": "NOITE (início)"})
     return turnos_finais
 
@@ -154,8 +154,9 @@ async def normaliza_escala_from_pdf(request: Request):
         last_unidade = None
         last_mes, last_ano = None, None
 
+        # EXTRAÇÃO DE DADOS DE TODAS AS PÁGINAS
         for page_idx, page_data in enumerate(body):
-            b64_data = page_data.get("base64")  # <- Corrigido de "bae64"
+            b64_data = page_data.get("bae64")
             if not b64_data: continue
             pdf_bytes = base64.b64decode(b64_data)
             with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
@@ -183,15 +184,17 @@ async def normaliza_escala_from_pdf(request: Request):
         if last_mes is None or last_ano is None:
             return JSONResponse(content={"error": "Mês/Ano não encontrados."}, status_code=400)
 
+        # --- PROCESSAMENTO POR BLOCOS DE CABEÇALHO ---
         profissionais_data = defaultdict(lambda: {"info_rows": []})
         header_map = None
         nome_idx = None
         idx_linha = 0
-        last_name = None
+        last_name = None   # <-- Inicializa aqui!
 
         while idx_linha < len(all_table_rows):
             row = all_table_rows[idx_linha]
             if row and any("NOME" in str(cell).upper() and "COMPLETO" in str(cell).upper() for cell in row):
+                # Detecta e ajusta offset se a primeira coluna for índice
                 first_is_index = (not row[0] or str(row[0]).strip().isdigit())
                 start = 1 if first_is_index else 0
                 header_row = row[start:]
@@ -202,10 +205,10 @@ async def normaliza_escala_from_pdf(request: Request):
                     elif "CARGO" in clean_name: header_map["CARGO"] = i+start
                     elif "VÍNCULO" in clean_name or "VINCULO" in clean_name: header_map["VÍNCULO"] = i+start
                     elif "CONSELHO" in clean_name or "CRM" in clean_name: header_map["CRM"] = i+start
-                    elif isinstance(col_name, (int, float)) or (str(col_name).strip().isdigit() if col_name else False):
-                        header_map[int(str(col_name).strip())] = i+start
+                    elif isinstance(col_name, (int, float)) or (str(col_name).isdigit() if col_name else False):
+                        header_map[int(col_name)] = i+start
                 nome_idx = header_map.get("NOME COMPLETO")
-                last_name = None
+                last_name = None   # <-- Reset após cada cabeçalho novo!
                 idx_linha += 1
                 continue
 
@@ -214,6 +217,7 @@ async def normaliza_escala_from_pdf(request: Request):
                 continue
 
             row = all_table_rows[idx_linha]
+            # Corrige se a primeira coluna é índice
             if row and (not row[0] or str(row[0]).strip().isdigit()):
                 row = row[1:]
             if not row or len(row) <= nome_idx:
@@ -235,20 +239,14 @@ async def normaliza_escala_from_pdf(request: Request):
         for nome, data in profissionais_data.items():
             info_rows = data["info_rows"]
             primeira_linha = info_rows[0]
-
-            crm_idx = header_map.get("CRM")
-            cargo_idx = header_map.get("CARGO")
-            vinculo_idx = header_map.get("VÍNCULO")
-
             profissional_obj = {
                 "medico_nome": nome,
-                "medico_crm": str(primeira_linha[crm_idx]).strip() if crm_idx is not None and crm_idx < len(primeira_linha) and primeira_linha[crm_idx] else "N/I",
-                "medico_especialidade": str(primeira_linha[cargo_idx]).strip() if cargo_idx is not None and cargo_idx < len(primeira_linha) else "N/I",
-                "medico_vinculo": str(primeira_linha[vinculo_idx]).strip() if vinculo_idx is not None and vinculo_idx < len(primeira_linha) else "N/I",
+                "medico_crm": str(primeira_linha[header_map.get("CRM")]).strip() if header_map.get("CRM") and header_map.get("CRM") < len(primeira_linha) and primeira_linha[header_map.get("CRM")] else "N/I",
+                "medico_especialidade": str(primeira_linha[header_map.get("CARGO")]).strip() if header_map.get("CARGO") and header_map.get("CARGO") < len(primeira_linha) else "N/I",
+                "medico_vinculo": str(primeira_linha[header_map.get("VÍNCULO")]).strip() if header_map.get("VÍNCULO") and header_map.get("VÍNCULO") < len(primeira_linha) else "N/I",
                 "medico_setor": last_setor or "NÃO INFORMADO",
                 "plantoes": []
             }
-
             plantoes_brutos = defaultdict(list)
             for row in info_rows:
                 for dia, col_idx in header_map.items():
@@ -259,24 +257,18 @@ async def normaliza_escala_from_pdf(request: Request):
             for dia, tokens in sorted(plantoes_brutos.items()):
                 for token in tokens:
                     turnos = interpretar_turno(token, last_setor or "")
-                    try:
-                        data_plantao = datetime(last_ano, last_mes, dia)
-                    except Exception:
-                        continue
+                    data_plantao = datetime(last_ano, last_mes, dia)
                     for turno_info in turnos:
                         horarios = HORARIOS_TURNO.get(turno_info["turno"], {})
                         if turno_info["turno"] == "NOITE (fim)":
-                            try:
-                                data_fim = data_plantao + timedelta(days=1)
-                                profissional_obj["plantoes"].append({
-                                    "dia": data_fim.day,
-                                    "data": data_fim.strftime('%d/%m/%Y'),
-                                    "turno": turno_info["turno"],
-                                    "inicio": horarios.get("inicio"),
-                                    "fim": horarios.get("fim")
-                                })
-                            except Exception:
-                                continue
+                            data_fim = data_plantao + timedelta(days=1)
+                            profissional_obj["plantoes"].append({
+                                "dia": data_fim.day,
+                                "data": data_fim.strftime('%d/%m/%Y'),
+                                "turno": turno_info["turno"],
+                                "inicio": horarios.get("inicio"),
+                                "fim": horarios.get("fim")
+                            })
                         else:
                             profissional_obj["plantoes"].append({
                                 "dia": data_plantao.day,
@@ -285,7 +277,6 @@ async def normaliza_escala_from_pdf(request: Request):
                                 "inicio": horarios.get("inicio"),
                                 "fim": horarios.get("fim")
                             })
-
             profissional_obj["plantoes"] = dedup_plantao(profissional_obj["plantoes"])
             if profissional_obj["plantoes"]:
                 profissional_obj["plantoes"].sort(key=lambda p: (p["dia"], p["inicio"] or ""))
@@ -303,7 +294,49 @@ async def normaliza_escala_from_pdf(request: Request):
     except Exception as e:
         return JSONResponse(content={"error": str(e), "trace": traceback.format_exc()}, status_code=500)
 
-    
+# --- FIM normaliza-escala-from-pdf ---
+
+@app.post("/text-to-pdf")
+async def text_to_pdf(request: Request):
+    try:
+        data = await request.json()
+        raw_text = data.get("text", "")
+        filename = data.get("filename", "saida.pdf")
+
+        if not os.path.exists(FONT_PATH):
+            raise RuntimeError(f"Fonte não encontrada em: {FONT_PATH}")
+
+        # Pré-processamento: substitui múltiplos \n e quebras "duplas"
+        clean_text = raw_text.replace("\r", "").replace("\n", " ")
+        clean_text = " ".join(clean_text.split())  # remove múltiplos espaços
+        lines = [clean_text[i:i+120] for i in range(0, len(clean_text), 120)]
+
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_auto_page_break(auto=True, margin=15)
+        pdf.add_font("DejaVu", "", FONT_PATH, uni=True)
+        pdf.set_font("DejaVu", size=10)
+
+        for line in lines:
+            pdf.multi_cell(w=190, h=8, txt=line)
+
+        # CORREÇÃO: Tratamento adequado do output do FPDF
+        pdf_output = pdf.output(dest='S')
+        
+        # Converte para bytes se necessário
+        if isinstance(pdf_output, str):
+            pdf_bytes = pdf_output.encode('latin1')
+        elif isinstance(pdf_output, bytearray):
+            pdf_bytes = bytes(pdf_output)
+        else:
+            pdf_bytes = pdf_output
+        
+        base64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
+
+        return JSONResponse(content={"file_base64": base64_pdf, "filename": filename})
+
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
 # --- FIM normaliza-escala-from-pdf ---
 
 @app.post("/text-to-pdf")
