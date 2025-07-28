@@ -13,6 +13,8 @@ import traceback
 from datetime import datetime, timedelta
 import textwrap
 from fpdf import FPDF
+from PyPDF2 import PdfReader
+from io import BytesIO
 
 app = FastAPI()
 
