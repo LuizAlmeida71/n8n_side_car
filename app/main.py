@@ -88,6 +88,8 @@ async def split_pdf(file: UploadFile = File(...)):
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 # --- INÍCIO normaliza-escala-from-pdf ---
+FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+
 MONTH_MAP = {
     'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
     'JUNHO': 6, 'JULHO': 7, 'AGOSTO': 8, 'SETEMBRO': 9, 'OUTUBRO': 10,
@@ -109,7 +111,7 @@ def parse_mes_ano(text):
     ano = int(ano_str)
     return mes, ano
 
-def interpretar_turno(token):
+def interpretar_turno(token, setor=""):
     if not token or not isinstance(token, str):
         return []
     token_clean = token.replace('\n', '').replace('/', '').replace(' ', '')
@@ -151,36 +153,38 @@ def dedup_plantao(lista):
 async def normaliza_escala_from_pdf(request: Request):
     try:
         body = await request.json()
-        full_text, all_table_rows = "", []
-        last_header_row = None
+        all_table_rows = []
+        pagina_linha_map = []
+        pagina_unidade_setor_map = {}
+
         last_setor = None
         last_unidade = None
-        last_mes, last_ano = None, None
+        last_mes = None
+        last_ano = None
 
         for page_idx, page_data in enumerate(body):
             b64_data = page_data.get("bae64")
-            if not b64_data: continue
+            if not b64_data:
+                continue
+
             pdf_bytes = base64.b64decode(b64_data)
             with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
                 page = doc[0]
                 page_text = page.get_text("text")
-                full_text += page_text + "\n"
                 for table in page.find_tables():
                     extracted = table.extract()
-                    if extracted: all_table_rows.extend(extracted)
+                    if extracted:
+                        for row in extracted:
+                            all_table_rows.append(row)
+                            pagina_linha_map.append(page_idx)
 
-            # Correções para capturar corretamente unidade e setor mesmo com merge
             unidade_match = re.search(r'UNIDADE:\s*(.*?)\s{2,}|\s{2,}UNIDADE:\s*(.*?)\n', page_text, re.IGNORECASE)
             setor_match = re.search(r'UNIDADE[\s/_\-]*SETOR:\s*(.*?)\s{2,}|RESPONSÁVEL[\s/_\-]*TÉCNICO:\s*(.*?)\n', page_text, re.IGNORECASE)
-
             mes, ano = parse_mes_ano(page_text)
 
             unidade = (unidade_match.group(1) or unidade_match.group(2)).strip() if unidade_match else last_unidade
             setor_raw = (setor_match.group(1) or setor_match.group(2)).strip() if setor_match else ""
             setor = setor_raw.replace("RESPONSÁVEL TÉCNICO", "").strip(" -:/") if setor_raw else last_setor
-
-            if mes is None: mes = last_mes
-            if ano is None: ano = last_ano
 
             if unidade: last_unidade = unidade
             else: unidade = last_unidade
@@ -190,8 +194,8 @@ async def normaliza_escala_from_pdf(request: Request):
             if ano: last_ano = ano
 
             pagina_unidade_setor_map[page_idx] = {
-            "unidade": unidade,
-            "setor": setor
+                "unidade": unidade,
+                "setor": setor
             }
 
         if last_mes is None or last_ano is None:
@@ -205,6 +209,8 @@ async def normaliza_escala_from_pdf(request: Request):
 
         while idx_linha < len(all_table_rows):
             row = all_table_rows[idx_linha]
+            page_idx = pagina_linha_map[idx_linha]
+
             if row and any("NOME" in str(cell).upper() and "COMPLETO" in str(cell).upper() for cell in row):
                 first_is_index = (not row[0] or str(row[0]).strip().isdigit())
                 start = 1 if first_is_index else 0
@@ -228,6 +234,7 @@ async def normaliza_escala_from_pdf(request: Request):
                 continue
 
             row = all_table_rows[idx_linha]
+            page_idx = pagina_linha_map[idx_linha]
             if row and (not row[0] or str(row[0]).strip().isdigit()):
                 row = row[1:]
             if not row or len(row) <= nome_idx:
@@ -239,26 +246,30 @@ async def normaliza_escala_from_pdf(request: Request):
                 last_name = nome_bruto.replace('\n', ' ').strip()
             elif nome_bruto and last_name is not None and len(nome_bruto.strip().split()) == 1:
                 last_name = f"{last_name} {nome_bruto.strip()}"
+
             if last_name is not None:
                 new_row = list(row)
                 new_row[nome_idx] = last_name
-                profissionais_data[last_name]["info_rows"].append(new_row)
+                profissionais_data[(last_name, page_idx)]["info_rows"].append(new_row)
+
             idx_linha += 1
 
         lista_profissionais_final = []
-        for nome, data in profissionais_data.items():
+        for (nome, page_idx), data in profissionais_data.items():
             info_rows = data["info_rows"]
             primeira_linha = info_rows[0]
+            unidade = pagina_unidade_setor_map.get(page_idx, {}).get("unidade", "NÃO INFORMADO")
+            setor = pagina_unidade_setor_map.get(page_idx, {}).get("setor", "NÃO INFORMADO")
+
             profissional_obj = {
                 "medico_nome": nome,
                 "medico_crm": str(primeira_linha[header_map.get("CRM")]).strip() if header_map.get("CRM") and header_map.get("CRM") < len(primeira_linha) and primeira_linha[header_map.get("CRM")] else "N/I",
                 "medico_especialidade": str(primeira_linha[header_map.get("CARGO")]).strip() if header_map.get("CARGO") and header_map.get("CARGO") < len(primeira_linha) else "N/I",
                 "medico_vinculo": str(primeira_linha[header_map.get("VÍNCULO")]).strip() if header_map.get("VÍNCULO") and header_map.get("VÍNCULO") < len(primeira_linha) else "N/I",
-                "medico_setor": pagina_unidade_setor_map.get(pagina_idx_profissional, {}).get("setor", "NÃO INFORMADO"),
+                "medico_setor": setor,
                 "plantoes": []
-                }
-
             }
+
             plantoes_brutos = defaultdict(list)
             for row in info_rows:
                 for dia, col_idx in header_map.items():
@@ -268,7 +279,7 @@ async def normaliza_escala_from_pdf(request: Request):
 
             for dia, tokens in sorted(plantoes_brutos.items()):
                 for token in tokens:
-                    turnos = interpretar_turno(token, last_setor or "")
+                    turnos = interpretar_turno(token, setor)
                     data_plantao = datetime(last_ano, last_mes, dia)
                     for turno_info in turnos:
                         horarios = HORARIOS_TURNO.get(turno_info["turno"], {})
