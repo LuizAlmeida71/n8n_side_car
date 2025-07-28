@@ -94,6 +94,7 @@ MONTH_MAP = {
     'JUNHO': 6, 'JULHO': 7, 'AGOSTO': 8, 'SETEMBRO': 9, 'OUTUBRO': 10,
     'NOVEMBRO': 11, 'DEZEMBRO': 12
 }
+
 HORARIOS_TURNO = {
     "MANHÃ": {"inicio": "07:00", "fim": "13:00"},
     "TARDE": {"inicio": "13:00", "fim": "19:00"},
@@ -102,26 +103,12 @@ HORARIOS_TURNO = {
 }
 
 def parse_mes_ano(text):
-    padroes = [
-        r'MÊS[\s:/\-]*([A-ZÇÃ]+)[\s/\\\-]*(\d{4})',
-        r'([A-ZÇÃ]+)[\s/\\\-]+(\d{4})',  # Ex: JULHO/2025
-        r'(\d{2})/(\d{4})'               # Ex: 07/2025
-    ]
-    for padrao in padroes:
-        match = re.search(padrao, text.upper())
-        if match:
-            mes_str, ano_str = match.groups()
-            try:
-                if mes_str.isdigit():
-                    mes = int(mes_str)
-                else:
-                    mes = MONTH_MAP.get(mes_str.upper())
-                ano = int(ano_str)
-                if mes and 1 <= mes <= 12:
-                    return mes, ano
-            except:
-                continue
-    return None, None
+    match = re.search(r'MÊS[\s/:]*([A-ZÇÃ]+)[\s/]*(\d{4})', text.upper())
+    if not match: return None, None
+    mes_nome, ano_str = match.groups()
+    mes = MONTH_MAP.get(mes_nome)
+    ano = int(ano_str)
+    return mes, ano
 
 def interpretar_turno(token, medico_setor):
     if not token or not isinstance(token, str): return []
@@ -180,12 +167,16 @@ async def normaliza_escala_from_pdf(request: Request):
                     extracted = table.extract()
                     if extracted: all_table_rows.extend(extracted)
 
-            unidade_match = re.search(r'UNIDADE:\s*(.*?)\n', page_text, re.IGNORECASE)
-            setor_match = re.search(r'UNIDADE[\s/_\-]*SETOR:\s*(.*?)\n', page_text, re.IGNORECASE)
+            # Correções para capturar corretamente unidade e setor mesmo com merge
+            unidade_match = re.search(r'UNIDADE:\s*(.*?)\s{2,}|\s{2,}UNIDADE:\s*(.*?)\n', page_text, re.IGNORECASE)
+            setor_match = re.search(r'UNIDADE[\s/_\-]*SETOR:\s*(.*?)\s{2,}|RESPONSÁVEL[\s/_\-]*TÉCNICO:\s*(.*?)\n', page_text, re.IGNORECASE)
+
             mes, ano = parse_mes_ano(page_text)
 
-            unidade = unidade_match.group(1).strip() if unidade_match else last_unidade
-            setor = setor_match.group(1).strip() if setor_match else last_setor
+            unidade = (unidade_match.group(1) or unidade_match.group(2)).strip() if unidade_match else last_unidade
+            setor_raw = (setor_match.group(1) or setor_match.group(2)).strip() if setor_match else ""
+            setor = setor_raw.replace("RESPONSÁVEL TÉCNICO", "").strip(" -:/") if setor_raw else last_setor
+
             if mes is None: mes = last_mes
             if ano is None: ano = last_ano
 
@@ -195,10 +186,7 @@ async def normaliza_escala_from_pdf(request: Request):
             if ano: last_ano = ano
 
         if last_mes is None or last_ano is None:
-            return JSONResponse(
-                content={"error": "Mês/Ano não encontrados.", "debug_hint": full_text[:1000]},
-                status_code=400
-            )
+            return JSONResponse(content={"error": "Mês/Ano não encontrados."}, status_code=400)
 
         profissionais_data = defaultdict(lambda: {"info_rows": []})
         header_map = None
@@ -290,6 +278,7 @@ async def normaliza_escala_from_pdf(request: Request):
                                 "inicio": horarios.get("inicio"),
                                 "fim": horarios.get("fim")
                             })
+
             profissional_obj["plantoes"] = dedup_plantao(profissional_obj["plantoes"])
             if profissional_obj["plantoes"]:
                 profissional_obj["plantoes"].sort(key=lambda p: (p["dia"], p["inicio"] or ""))
@@ -306,6 +295,7 @@ async def normaliza_escala_from_pdf(request: Request):
 
     except Exception as e:
         return JSONResponse(content={"error": str(e), "trace": traceback.format_exc()}, status_code=500)
+
 
 
 # --- FIM normaliza-escala-from-pdf ---
