@@ -88,6 +88,17 @@ async def split_pdf(file: UploadFile = File(...)):
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 # --- INÍCIO normaliza-escala-from-pdf ---
+import re
+import base64
+import fitz
+from datetime import datetime, timedelta
+from collections import defaultdict
+from fastapi import Request
+from fastapi.responses import JSONResponse
+from fpdf import FPDF
+import os
+import traceback
+
 MONTH_MAP = {
     'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
     'JUNHO': 6, 'JULHO': 7, 'AGOSTO': 8, 'SETEMBRO': 9, 'OUTUBRO': 10,
@@ -102,9 +113,8 @@ HORARIOS_TURNO = {
 }
 
 def parse_mes_ano(text):
-    # Busca padrões mais específicos para mês/ano
+    """Extrai mês e ano do texto"""
     patterns = [
-        r'MÊS/ANO:\s*([A-ZÇÃ]+)\s*/\s*(\d{4})',
         r'MÊS[\s/:]*([A-ZÇÃ]+)[\s/]*(\d{4})',
         r'([A-ZÇÃ]+)/(\d{4})',
         r'MÊS:\s*([A-ZÇÃ]+)/(\d{4})',
@@ -123,28 +133,31 @@ def parse_mes_ano(text):
     return None, None
 
 def extract_unidade_setor_from_text(page_text):
-    """
-    Extrai informações de UNIDADE e SETOR do texto completo da página
-    """
+    """Extrai UNIDADE e SETOR considerando diferentes formatos"""
     unidade = None
     setor = None
     
-    # Padrões mais específicos para diferentes layouts
+    # Padrões para UNIDADE
     unidade_patterns = [
         r'UNIDADE:\s*([^/\n]+?)(?:\s*UNIDADE[\s/_\-]*SETOR:|$|\n)',
         r'UNIDADE:\s*([^\n]+?)(?:\s{2,}|\n)',
-        r'UNIDADE:\s*([^/]+?)(?:/|$)',
+        r'UNIDADE:\s*([^/]+?)/',
         r'UNIDADE:\s*(.+?)(?=\s*MÊS:|$|\n)'
     ]
     
+    # Padrões para SETOR - incluindo casos específicos de páginas de continuação
     setor_patterns = [
         r'UNIDADE[\s/_\-]*SETOR:\s*([^/\n]+?)(?:\s*/\s*RESPONSÁVEL|$|\n)',
-        r'UNIDADE[\s/_\-]*SETOR:\s*([^\n]+?)(?:\s{2,}|\n|$)',
-        r'RESPONSÁVEL[\s/_\-]*TÉCNICO:\s*([^\n,]+?)(?:\s{2,}|\n|$)',
-        r'SETOR:\s*([^/\n]+?)(?:/|$|\n)'
+        r'SETOR:\s*([^/\n]+?)(?:/|$|\n)',
+        # Padrão específico para páginas de continuação com cabeçalho simplificado
+        r'UNIDADE[\s:]*([^/\n]+?)(?:[\s/]+SETOR[\s:]*([^/\n]+?))?',
+        # Busca isolada por UTI ou outros setores
+        r'(UTI[^/\n]*\d*)',
+        r'(CENTRO[^/\n]+)',
+        r'(EMERGÊNCIA[^/\n]+)'
     ]
     
-    # Busca UNIDADE
+    # Tenta extrair UNIDADE
     for pattern in unidade_patterns:
         match = re.search(pattern, page_text, re.IGNORECASE | re.DOTALL)
         if match:
@@ -154,134 +167,121 @@ def extract_unidade_setor_from_text(page_text):
                 unidade = unidade_raw
                 break
     
-    # Busca SETOR
+    # Tenta extrair SETOR
     for pattern in setor_patterns:
         match = re.search(pattern, page_text, re.IGNORECASE | re.DOTALL)
         if match:
-            setor_raw = match.group(1).strip()
-            setor_raw = re.sub(r'RESPONSÁVEL\s*TÉCNICO', '', setor_raw, flags=re.IGNORECASE)
-            setor_raw = setor_raw.strip(' -:/,')
-            if setor_raw and len(setor_raw) > 2:
-                setor = setor_raw
-                break
+            if match.lastindex and match.lastindex > 1:
+                # Para padrões com múltiplos grupos
+                setor_raw = match.group(2) if match.group(2) else match.group(1)
+            else:
+                setor_raw = match.group(1)
+            
+            if setor_raw:
+                setor_raw = setor_raw.strip()
+                setor_raw = re.sub(r'RESPONSÁVEL\s*TÉCNICO', '', setor_raw, flags=re.IGNORECASE)
+                setor_raw = setor_raw.strip(' -:/,')
+                if setor_raw and len(setor_raw) > 2:
+                    setor = setor_raw
+                    break
     
     return unidade, setor
 
 def is_header_row(row):
-    """
-    Identifica se uma linha é cabeçalho da tabela
-    """
+    """Identifica se uma linha é cabeçalho da tabela"""
     if not row:
         return False
     
     row_text = ' '.join([str(cell) for cell in row if cell]).upper()
     
-    # Indicadores claros de cabeçalho
-    strong_indicators = ['NOME COMPLETO', 'CARGO', 'MATRÍCULA', 'VÍNCULO', 'VINCULO']
-    has_strong = any(indicator in row_text for indicator in strong_indicators)
+    # Indicadores de cabeçalho
+    header_indicators = [
+        'NOME COMPLETO', 'NOME', 'CARGO', 'MATRÍCULA', 'VÍNCULO', 'VINCULO',
+        'CRM', 'CONSELHO', 'HORÁRIO', 'HORARIO', 'CH', 'C.H'
+    ]
     
-    # Indicadores de apoio
-    support_indicators = ['CRM', 'CONSELHO', 'HORÁRIO', 'HORARIO', 'CH']
-    has_support = any(indicator in row_text for indicator in support_indicators)
+    # Verifica se tem pelo menos 2 indicadores
+    count = sum(1 for indicator in header_indicators if indicator in row_text)
     
-    # Números sequenciais (dias do mês)
-    numeric_days = 0
-    for cell in row:
-        if cell and (isinstance(cell, (int, float)) or 
-                    (isinstance(cell, str) and cell.strip().isdigit())):
-            try:
-                day = int(cell)
-                if 1 <= day <= 31:
-                    numeric_days += 1
-            except:
-                pass
+    # Ou se tem números sequenciais (dias do mês)
+    numeric_count = sum(1 for cell in row if isinstance(cell, (int, float)) or 
+                       (isinstance(cell, str) and cell.isdigit() and 1 <= int(cell) <= 31))
     
-    return has_strong or (has_support and numeric_days >= 3) or numeric_days >= 10
+    return count >= 2 or numeric_count >= 5
+
+def clean_cell_value(value):
+    """Limpa o valor de uma célula"""
+    if not value:
+        return ""
+    return str(value).replace('\n', ' ').strip()
 
 def build_header_map(row):
-    """
-    Constrói o mapeamento de colunas do cabeçalho de forma mais robusta
-    """
+    """Constrói mapeamento de colunas com melhor detecção"""
     if not row:
         return {}, None
-    
-    # Verifica se a primeira coluna é um índice
-    first_is_index = False
-    if row[0]:
-        first_cell = str(row[0]).strip()
-        if first_cell.isdigit() or first_cell in ['', 'Nº', '#', 'N°'] or not first_cell:
-            first_is_index = True
-    else:
-        first_is_index = True
-    
-    start = 1 if first_is_index else 0
-    header_row = row[start:] if start < len(row) else row
     
     header_map = {}
     nome_idx = None
     
-    for i, col_name in enumerate(header_row):
+    # Processa cada coluna
+    for i, col_name in enumerate(row):
         if not col_name:
             continue
             
-        clean_name = str(col_name).replace('\n', ' ').strip().upper()
-        actual_idx = i + start
+        clean_name = clean_cell_value(col_name).upper()
         
-        # Mapeamento específico
-        if "NOME COMPLETO" in clean_name or (clean_name == "NOME" and "COMPLETO" not in row_text for row_text in [str(c) for c in header_row]):
-            header_map["NOME COMPLETO"] = actual_idx
-            nome_idx = actual_idx
+        # Mapeamento de colunas principais
+        if "NOME" in clean_name and "COMPLETO" in clean_name:
+            header_map["NOME COMPLETO"] = i
+            nome_idx = i
+        elif clean_name == "NOME" and nome_idx is None:
+            header_map["NOME COMPLETO"] = i
+            nome_idx = i
         elif "CARGO" in clean_name:
-            header_map["CARGO"] = actual_idx
+            header_map["CARGO"] = i
         elif "VÍNCULO" in clean_name or "VINCULO" in clean_name:
-            header_map["VÍNCULO"] = actual_idx
-        elif "CONSELHO" in clean_name or clean_name == "CRM":
-            header_map["CRM"] = actual_idx
+            header_map["VÍNCULO"] = i
+        elif "CONSELHO" in clean_name or "CRM" in clean_name:
+            header_map["CRM"] = i
         elif "MATRÍCULA" in clean_name or "MATRICULA" in clean_name:
-            header_map["MATRÍCULA"] = actual_idx
+            header_map["MATRÍCULA"] = i
         elif "HORÁRIO" in clean_name or "HORARIO" in clean_name:
-            header_map["HORÁRIO"] = actual_idx
-        elif clean_name == "CH":
-            header_map["CH"] = actual_idx
-        # Dias do mês
-        elif isinstance(col_name, (int, float)):
-            day = int(col_name)
-            if 1 <= day <= 31:
-                header_map[day] = actual_idx
-        elif isinstance(col_name, str) and col_name.strip().isdigit():
-            day = int(col_name.strip())
-            if 1 <= day <= 31:
-                header_map[day] = actual_idx
+            header_map["HORÁRIO"] = i
+        elif clean_name in ["CH", "C.H", "C.H."]:
+            header_map["CH"] = i
+        # Colunas numéricas (dias)
+        else:
+            try:
+                day = int(clean_name.replace('.', '').replace(',', ''))
+                if 1 <= day <= 31:
+                    header_map[day] = i
+            except:
+                pass
     
     return header_map, nome_idx
 
-def clean_merged_row(row):
-    """
-    Limpa linhas com potencial merge de células
-    """
-    if not row:
-        return row
+def extract_info_from_row(row, header_map):
+    """Extrai informações de uma linha baseado no mapeamento"""
+    info = {}
     
-    cleaned_row = []
-    for cell in row:
-        if cell is None:
-            cleaned_row.append("")
-        elif isinstance(cell, str):
-            # Remove quebras de linha e normaliza espaços
-            cleaned_cell = cell.replace('\n', ' ').strip()
-            cleaned_row.append(cleaned_cell)
-        else:
-            cleaned_row.append(str(cell).strip())
+    for key, idx in header_map.items():
+        if isinstance(key, str) and idx < len(row):
+            value = clean_cell_value(row[idx])
+            if value:
+                info[key] = value
     
-    return cleaned_row
+    return info
 
 def interpretar_turno(token, setor=""):
+    """Interpreta tokens de turno"""
     if not token or not isinstance(token, str):
         return []
-    token_clean = token.replace('\n', '').replace('/', '').replace(' ', '')
-    tokens = list(token_clean)
+    
+    token_clean = token.upper().replace('\n', '').replace('/', '').replace(' ', '').strip()
     turnos_finais = []
-    for t in tokens:
+    
+    # Processa cada caractere do token
+    for t in token_clean:
         if t == 'M':
             turnos_finais.append({"turno": "MANHÃ"})
         elif t == 'T':
@@ -294,20 +294,31 @@ def interpretar_turno(token, setor=""):
             turnos_finais.append({"turno": "NOITE (fim)"})
         elif t == 'n':
             turnos_finais.append({"turno": "NOITE (início)"})
+    
     return turnos_finais
 
 def is_valid_professional_name(name):
-    if not name or not isinstance(name, str): 
+    """Valida nome de profissional"""
+    if not name or not isinstance(name, str):
         return False
-    name_upper = name.strip().upper()
+    
+    name_clean = clean_cell_value(name)
+    name_upper = name_clean.upper()
+    
+    # Palavras que indicam que não é um nome
     ignored = ["NOME COMPLETO", "LEGENDA", "ASSINATURA", "ASSINADO", "COMPLETO", 
-               "CARGO", "MATRÍCULA", "HORÁRIO", "CONSELHO", "VÍNCULO", "VINCULO"]
-    if any(keyword in name_upper for keyword in ignored): 
+               "CARGO", "MATRÍCULA", "HORÁRIO", "CONSELHO", "VÍNCULO", "UNIDADE",
+               "SETOR", "MÊS", "ANO"]
+    
+    if any(keyword in name_upper for keyword in ignored):
         return False
-    # Nome deve ter pelo menos 2 palavras ou ser todo maiúsculo
-    return len(name.split()) >= 2 and len(name.strip()) > 3
+    
+    # Deve ter pelo menos 2 palavras ou ser todo maiúsculo
+    parts = name_clean.split()
+    return len(parts) >= 2 or (len(parts) == 1 and name_clean.isupper() and len(name_clean) > 3)
 
 def dedup_plantao(lista):
+    """Remove plantões duplicados"""
     seen = set()
     result = []
     for p in lista:
@@ -321,214 +332,186 @@ def dedup_plantao(lista):
 async def normaliza_escala_from_pdf(request: Request):
     try:
         body = await request.json()
-        all_table_rows = []
-        pagina_linha_map = []
-        pagina_unidade_setor_map = {}
-
-        # Variáveis globais para manter contexto
-        global_setor = None
+        all_pages_data = []
+        
+        # Variáveis globais para manter valores entre páginas
         global_unidade = None
+        global_setor = None
         global_mes = None
         global_ano = None
-        global_header_map = None
-        global_nome_idx = None
-
-        # Primeira passada: extrai dados de cada página
+        
+        # Primeira passada: extrai dados básicos de todas as páginas
         for page_idx, page_data in enumerate(body):
             b64_data = page_data.get("bae64")
             if not b64_data:
                 continue
-
+            
             pdf_bytes = base64.b64decode(b64_data)
+            
             with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
                 page = doc[0]
                 page_text = page.get_text("text")
                 
-                # Extrai metadados da página
+                # Extrai unidade e setor
                 unidade, setor = extract_unidade_setor_from_text(page_text)
                 mes, ano = parse_mes_ano(page_text)
                 
-                # Atualiza contexto global
-                if unidade: 
+                # Atualiza valores globais
+                if unidade:
                     global_unidade = unidade
-                if setor: 
+                if setor:
                     global_setor = setor
-                if mes: 
+                if mes:
                     global_mes = mes
-                if ano: 
+                if ano:
                     global_ano = ano
                 
-                # Mapeia informações da página
-                pagina_unidade_setor_map[page_idx] = {
-                    "unidade": unidade or global_unidade or "NÃO INFORMADO",
-                    "setor": setor or global_setor or "NÃO INFORMADO"
-                }
-                
-                # Extração de tabelas
+                # Extrai tabelas
+                tables_data = []
                 for table in page.find_tables():
                     extracted = table.extract()
                     if extracted:
-                        for row in extracted:
-                            cleaned_row = clean_merged_row(row)
-                            all_table_rows.append(cleaned_row)
-                            pagina_linha_map.append(page_idx)
-
-        if global_mes is None or global_ano is None:
-            return JSONResponse(content={"error": "Mês/Ano não encontrados."}, status_code=400)
-
-        # Segunda passada: processa dados dos profissionais
-        profissionais_data = defaultdict(lambda: {"info_rows": [], "page_idx": None})
-        idx_linha = 0
-        last_name = None
-
-        while idx_linha < len(all_table_rows):
-            row = all_table_rows[idx_linha]
-            page_idx = pagina_linha_map[idx_linha]
-
-            # Detecta cabeçalho
-            if is_header_row(row):
-                header_map, nome_idx = build_header_map(row)
-                if header_map and nome_idx is not None:
-                    global_header_map = header_map
-                    global_nome_idx = nome_idx
-                last_name = None
-                idx_linha += 1
-                continue
-
-            # Usa cabeçalho global se não há cabeçalho local
-            current_header_map = global_header_map
-            current_nome_idx = global_nome_idx
-
-            if not current_header_map or current_nome_idx is None:
-                idx_linha += 1
-                continue
-
-            # Remove coluna de índice se presente
-            processed_row = row[:]
-            if (processed_row and processed_row[0] and 
-                str(processed_row[0]).strip().isdigit()):
-                processed_row = processed_row[1:]
-                # Ajusta índices do header_map
-                adjusted_header_map = {}
-                adjusted_nome_idx = None
-                for key, value in current_header_map.items():
-                    if value > 0:
-                        adjusted_header_map[key] = value - 1
-                        if key == "NOME COMPLETO":
-                            adjusted_nome_idx = value - 1
-                current_header_map = adjusted_header_map
-                current_nome_idx = adjusted_nome_idx
-
-            if current_nome_idx is None or current_nome_idx >= len(processed_row):
-                idx_linha += 1
-                continue
-
-            # Processa nome do profissional
-            nome_bruto = processed_row[current_nome_idx]
-            
-            if nome_bruto and is_valid_professional_name(nome_bruto):
-                last_name = nome_bruto.strip()
-            elif (nome_bruto and last_name is not None and 
-                  len(str(nome_bruto).strip().split()) == 1):
-                last_name = f"{last_name} {str(nome_bruto).strip()}"
-
-            # Armazena dados se há nome válido
-            if last_name is not None:
-                key = (last_name, page_idx)
-                profissionais_data[key]["info_rows"].append(processed_row)
-                profissionais_data[key]["page_idx"] = page_idx
-                profissionais_data[key]["header_map"] = current_header_map
-
-            idx_linha += 1
-
-        # Terceira passada: monta resultado final
-        lista_profissionais_final = []
-        
-        for (nome, page_idx), data in profissionais_data.items():
-            info_rows = data["info_rows"]
-            header_map = data.get("header_map", global_header_map)
-            
-            if not info_rows or not header_map:
-                continue
+                        tables_data.extend(extracted)
                 
-            primeira_linha = info_rows[0]
-            unidade = pagina_unidade_setor_map.get(page_idx, {}).get("unidade", "NÃO INFORMADO")
-            setor = pagina_unidade_setor_map.get(page_idx, {}).get("setor", "NÃO INFORMADO")
-
-            # Extrai informações do profissional de forma mais robusta
-            def get_field_value(field_name, default="N/I"):
-                col_idx = header_map.get(field_name)
-                if col_idx is not None and col_idx < len(primeira_linha):
-                    value = primeira_linha[col_idx]
-                    if value and str(value).strip():
-                        return str(value).strip()
-                return default
-
-            profissional_obj = {
-                "medico_nome": nome,
-                "medico_crm": get_field_value("CRM"),
-                "medico_especialidade": get_field_value("CARGO"),
-                "medico_vinculo": get_field_value("VÍNCULO"),
-                "medico_setor": setor,
-                "plantoes": []
-            }
-
-            # Processa plantões
-            plantoes_brutos = defaultdict(list)
-            for row in info_rows:
-                for dia, col_idx in header_map.items():
-                    if isinstance(dia, int) and 1 <= dia <= 31:
-                        if col_idx < len(row) and row[col_idx]:
-                            token = str(row[col_idx]).strip()
-                            if token:
-                                plantoes_brutos[dia].append(token)
-
-            # Converte plantões para formato final
-            for dia, tokens in sorted(plantoes_brutos.items()):
-                for token in tokens:
-                    turnos = interpretar_turno(token, setor)
-                    data_plantao = datetime(global_ano, global_mes, dia)
-                    
-                    for turno_info in turnos:
-                        horarios = HORARIOS_TURNO.get(turno_info["turno"], {})
-                        
-                        if turno_info["turno"] == "NOITE (fim)":
-                            data_fim = data_plantao + timedelta(days=1)
-                            profissional_obj["plantoes"].append({
-                                "dia": data_fim.day,
-                                "data": data_fim.strftime('%d/%m/%Y'),
-                                "turno": turno_info["turno"],
-                                "inicio": horarios.get("inicio"),
-                                "fim": horarios.get("fim")
-                            })
-                        else:
-                            profissional_obj["plantoes"].append({
-                                "dia": data_plantao.day,
-                                "data": data_plantao.strftime('%d/%m/%Y'),
-                                "turno": turno_info["turno"],
-                                "inicio": horarios.get("inicio"),
-                                "fim": horarios.get("fim")
-                            })
-
-            # Finaliza profissional
-            profissional_obj["plantoes"] = dedup_plantao(profissional_obj["plantoes"])
-            if profissional_obj["plantoes"]:
-                profissional_obj["plantoes"].sort(key=lambda p: (p["dia"], p["inicio"] or ""))
-                lista_profissionais_final.append(profissional_obj)
-
+                all_pages_data.append({
+                    "page_idx": page_idx,
+                    "unidade": unidade or global_unidade,
+                    "setor": setor or global_setor,
+                    "tables": tables_data,
+                    "text": page_text
+                })
+        
+        if not global_mes or not global_ano:
+            return JSONResponse(content={"error": "Mês/Ano não encontrados"}, status_code=400)
+        
+        # Processa todas as páginas
+        todos_profissionais = []
+        
+        for page_data in all_pages_data:
+            page_idx = page_data["page_idx"]
+            unidade = page_data["unidade"] or "NÃO INFORMADO"
+            setor = page_data["setor"] or "NÃO INFORMADO"
+            tables = page_data["tables"]
+            
+            # Processa tabelas da página
+            profissionais_pagina = processar_tabelas_pagina(
+                tables, unidade, setor, global_mes, global_ano, page_idx
+            )
+            
+            todos_profissionais.extend(profissionais_pagina)
+        
         # Resultado final
-        mes_nome_str = list(MONTH_MAP.keys())[list(MONTH_MAP.values()).index(global_mes)]
-        final_output = [{
+        mes_nome = list(MONTH_MAP.keys())[list(MONTH_MAP.values()).index(global_mes)]
+        
+        return JSONResponse(content=[{
             "unidade_escala": global_unidade or "NÃO INFORMADO",
-            "mes_ano_escala": f"{mes_nome_str}/{global_ano}",
-            "profissionais": lista_profissionais_final
-        }]
-
-        return JSONResponse(content=final_output)
-
+            "mes_ano_escala": f"{mes_nome}/{global_ano}",
+            "profissionais": todos_profissionais
+        }])
+        
     except Exception as e:
-        return JSONResponse(content={"error": str(e), "trace": traceback.format_exc()}, status_code=500)
+        return JSONResponse(
+            content={"error": str(e), "trace": traceback.format_exc()}, 
+            status_code=500
+        )
 
+def processar_tabelas_pagina(tables, unidade, setor, mes, ano, page_idx):
+    """Processa todas as tabelas de uma página"""
+    profissionais = []
+    current_header_map = None
+    current_nome_idx = None
+    profissionais_temp = {}
+    
+    for row_idx, row in enumerate(tables):
+        # Verifica se é cabeçalho
+        if is_header_row(row):
+            current_header_map, current_nome_idx = build_header_map(row)
+            continue
+        
+        # Se não tem cabeçalho válido, pula
+        if not current_header_map or current_nome_idx is None:
+            continue
+        
+        # Extrai nome
+        nome = None
+        if current_nome_idx < len(row):
+            nome_raw = row[current_nome_idx]
+            if nome_raw and is_valid_professional_name(nome_raw):
+                nome = clean_cell_value(nome_raw)
+        
+        if not nome:
+            continue
+        
+        # Se é um novo profissional, cria entrada
+        if nome not in profissionais_temp:
+            info = extract_info_from_row(row, current_header_map)
+            
+            profissionais_temp[nome] = {
+                "medico_nome": nome,
+                "medico_crm": info.get("CRM", "N/I"),
+                "medico_especialidade": info.get("CARGO", "N/I"),
+                "medico_vinculo": info.get("VÍNCULO", "N/I"),
+                "medico_setor": setor,
+                "plantoes_raw": defaultdict(list),
+                "header_map": current_header_map
+            }
+        
+        # Extrai plantões da linha
+        prof_data = profissionais_temp[nome]
+        for dia, col_idx in prof_data["header_map"].items():
+            if isinstance(dia, int) and 1 <= dia <= 31 and col_idx < len(row):
+                cell_value = row[col_idx]
+                if cell_value:
+                    cell_clean = clean_cell_value(cell_value)
+                    if cell_clean:
+                        prof_data["plantoes_raw"][dia].append(cell_clean)
+    
+    # Converte profissionais temporários para formato final
+    for nome, prof_data in profissionais_temp.items():
+        plantoes = []
+        
+        for dia, tokens in prof_data["plantoes_raw"].items():
+            for token in tokens:
+                turnos = interpretar_turno(token, prof_data["medico_setor"])
+                
+                for turno_info in turnos:
+                    horarios = HORARIOS_TURNO.get(turno_info["turno"], {})
+                    data_plantao = datetime(ano, mes, dia)
+                    
+                    if turno_info["turno"] == "NOITE (fim)":
+                        data_fim = data_plantao + timedelta(days=1)
+                        plantoes.append({
+                            "dia": data_fim.day,
+                            "data": data_fim.strftime('%d/%m/%Y'),
+                            "turno": turno_info["turno"],
+                            "inicio": horarios.get("inicio"),
+                            "fim": horarios.get("fim")
+                        })
+                    else:
+                        plantoes.append({
+                            "dia": data_plantao.day,
+                            "data": data_plantao.strftime('%d/%m/%Y'),
+                            "turno": turno_info["turno"],
+                            "inicio": horarios.get("inicio"),
+                            "fim": horarios.get("fim")
+                        })
+        
+        # Remove duplicados e ordena
+        plantoes = dedup_plantao(plantoes)
+        plantoes.sort(key=lambda p: (p["dia"], p["inicio"] or ""))
+        
+        if plantoes:  # Só adiciona se tiver plantões
+            profissional_final = {
+                "medico_nome": prof_data["medico_nome"],
+                "medico_crm": prof_data["medico_crm"],
+                "medico_especialidade": prof_data["medico_especialidade"],
+                "medico_vinculo": prof_data["medico_vinculo"],
+                "medico_setor": prof_data["medico_setor"],
+                "plantoes": plantoes
+            }
+            profissionais.append(profissional_final)
+    
+    return profissionais
 # --- FIM normaliza-escala-from-pdf ---
 
 @app.post("/text-to-pdf")
