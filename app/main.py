@@ -172,46 +172,29 @@ async def normaliza_escala_from_pdf(request: Request):
                 for table in page.find_tables():
                     extracted = table.extract()
                     if extracted:
-                        # Check for merged cells and adjust row data
-                        for row_idx, row in enumerate(extracted):
-                            if row_idx == 0:  # Assume first row might contain header info
-                                for cell_idx, cell in enumerate(row):
-                                    if isinstance(cell, (int, float)) and cell_idx > 0 and not str(cell).isdigit():  # Ignore irrelevant numeric headers
-                                        row[cell_idx] = None
+                        for row in extracted:
                             all_table_rows.append(row)
                             pagina_linha_map.append(page_idx)
 
-                # Extract header info from page text and table
                 unidade_match = re.search(r'UNIDADE:\s*(.*?)\s{2,}|\s{2,}UNIDADE:\s*(.*?)\n', page_text, re.IGNORECASE)
                 setor_match = re.search(r'UNIDADE[\s/_\-]*SETOR:\s*(.*?)\s{2,}|RESPONSÁVEL[\s/_\-]*TÉCNICO:\s*(.*?)\n', page_text, re.IGNORECASE)
                 mes, ano = parse_mes_ano(page_text)
 
-                # Check first row of table for UNIDADE and UNIDADE SETOR
-                first_row = all_table_rows[0] if all_table_rows else []
-                unidade_from_table = next((cell for cell in first_row if "UNIDADE:" in str(cell).upper()), None)
-                setor_from_table = next((cell for cell in first_row if "UNIDADE SETOR:" in str(cell).upper() or "RESPONSÁVEL TÉCNICO:" in str(cell).upper()), None)
-
-                # Prioritize table header, then fall back to page text
-                unidade = (unidade_from_table.split("UNIDADE:")[1].strip() if unidade_from_table else None) or (unidade_match.group(1) or unidade_match.group(2) if unidade_match else None)
-                setor_raw = (setor_from_table.split("UNIDADE SETOR:")[1].strip() if setor_from_table and "UNIDADE SETOR:" in str(setor_from_table) else
-                            setor_from_table.split("RESPONSÁVEL TÉCNICO:")[1].strip() if setor_from_table and "RESPONSÁVEL TÉCNICO:" in str(setor_from_table) else None) or \
-                            (setor_match.group(1) or setor_match.group(2) if setor_match else None)
+                # Reset to None for each new page to force re-detection
+                unidade = (unidade_match.group(1) or unidade_match.group(2)).strip() if unidade_match else None
+                setor_raw = (setor_match.group(1) or setor_match.group(2)).strip() if setor_match else None
                 setor = setor_raw.replace("RESPONSÁVEL TÉCNICO", "").strip(" -:/") if setor_raw else None
 
-                # Update last_ values only if current page has a match
-                if unidade:
-                    last_unidade = unidade.strip()
-                if setor:
-                    last_setor = setor.strip()
-                if mes:
-                    last_mes = mes
-                if ano:
-                    last_ano = ano
+                if unidade: last_unidade = unidade
+                else: unidade = last_unidade
+                if setor: last_setor = setor
+                else: setor = last_setor
+                if mes: last_mes = mes
+                if ano: last_ano = ano
 
-                # Store the current page's values, falling back to last_ values if not found
                 pagina_unidade_setor_map[page_idx] = {
-                    "unidade": last_unidade or "NÃO INFORMADO",
-                    "setor": last_setor or "NÃO INFORMADO"
+                    "unidade": unidade or last_unidade or "NÃO INFORMADO",
+                    "setor": setor or last_setor or "NÃO INFORMADO"
                 }
 
         if last_mes is None or last_ano is None:
@@ -234,15 +217,11 @@ async def normaliza_escala_from_pdf(request: Request):
                 header_map = {}
                 for i, col_name in enumerate(header_row):
                     clean_name = str(col_name).replace('\n', ' ').strip().upper()
-                    if "NOME COMPLETO" in clean_name:
-                        header_map["NOME COMPLETO"] = i + start
-                    elif "CARGO" in clean_name:
-                        header_map["CARGO"] = i + start
-                    elif "VÍNCULO" in clean_name or "VINCULO" in clean_name:
-                        header_map["VÍNCULO"] = i + start
-                    elif "CONSELHO" in clean_name or "CRM" in clean_name:
-                        header_map["CRM"] = i + start
-                    elif isinstance(col_name, (int, float)) and str(col_name).isdigit():
+                    if "NOME COMPLETO" in clean_name: header_map["NOME COMPLETO"] = i + start
+                    elif "CARGO" in clean_name: header_map["CARGO"] = i + start
+                    elif "VÍNCULO" in clean_name or "VINCULO" in clean_name: header_map["VÍNCULO"] = i + start
+                    elif "CONSELHO" in clean_name or "CRM" in clean_name: header_map["CRM"] = i + start
+                    elif isinstance(col_name, (int, float)) or (str(col_name).isdigit() if col_name else False):
                         header_map[int(col_name)] = i + start
                 nome_idx = header_map.get("NOME COMPLETO")
                 last_name = None
