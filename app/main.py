@@ -88,17 +88,7 @@ async def split_pdf(file: UploadFile = File(...)):
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 # --- INÍCIO normaliza-escala-from-pdf ---
-import re
-import base64
-import fitz
-from datetime import datetime, timedelta
-from collections import defaultdict
-from fastapi import Request
-from fastapi.responses import JSONResponse
-from fpdf import FPDF
-import os
-import traceback
-
+# Constantes
 MONTH_MAP = {
     'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
     'JUNHO': 6, 'JULHO': 7, 'AGOSTO': 8, 'SETEMBRO': 9, 'OUTUBRO': 10,
@@ -111,6 +101,7 @@ HORARIOS_TURNO = {
     "NOITE (início)": {"inicio": "19:00", "fim": "01:00"},
     "NOITE (fim)": {"inicio": "01:00", "fim": "07:00"},
 }
+
 
 def parse_mes_ano(text):
     """Extrai mês e ano do texto com múltiplos padrões"""
@@ -132,9 +123,10 @@ def parse_mes_ano(text):
                 try:
                     ano = int(ano_str)
                     return mes, ano
-                except:
+                except ValueError:
                     pass
     return None, None
+
 
 def extract_unidade_setor_from_text(page_text):
     """
@@ -203,6 +195,7 @@ def extract_unidade_setor_from_text(page_text):
     
     return unidade, setor
 
+
 def is_header_row(row):
     """Identifica se uma linha é cabeçalho da tabela"""
     if not row or len(row) < 3:
@@ -229,11 +222,12 @@ def is_header_row(row):
                 val = int(str(cell).strip().replace('.', ''))
                 if 1 <= val <= 31:
                     day_count += 1
-            except:
+            except ValueError:
                 pass
     
     # É cabeçalho se tem indicadores E dias, ou muitos dias
     return (indicator_count >= 2 and day_count >= 5) or day_count >= 10
+
 
 def is_multi_line_header(rows, start_idx):
     """Verifica se há um cabeçalho de múltiplas linhas"""
@@ -258,6 +252,7 @@ def is_multi_line_header(rows, start_idx):
         return True, 2
     
     return False, 0
+
 
 def build_header_map(rows, start_idx):
     """
@@ -311,10 +306,11 @@ def build_header_map(rows, start_idx):
                 day = int(cell_text.replace('.', '').replace(',', ''))
                 if 1 <= day <= 31:
                     header_map[day] = i
-            except:
+            except ValueError:
                 pass
     
     return header_map, nome_idx, lines
+
 
 def clean_cell_value(value):
     """Limpa e normaliza valor de célula"""
@@ -328,6 +324,7 @@ def clean_cell_value(value):
     
     return cleaned
 
+
 def extract_professional_info(row, header_map):
     """Extrai informações do profissional da linha"""
     info = {}
@@ -339,6 +336,7 @@ def extract_professional_info(row, header_map):
                 info[key] = value
     
     return info
+
 
 def is_valid_professional_name(name):
     """Valida se é um nome de profissional válido"""
@@ -370,6 +368,7 @@ def is_valid_professional_name(name):
     
     return False
 
+
 def interpretar_turno(token, setor=""):
     """Interpreta tokens de turno"""
     if not token or not isinstance(token, str):
@@ -399,6 +398,7 @@ def interpretar_turno(token, setor=""):
     
     return turnos
 
+
 def dedup_plantao(plantoes):
     """Remove plantões duplicados"""
     seen = set()
@@ -411,6 +411,7 @@ def dedup_plantao(plantoes):
             result.append(p)
     
     return result
+
 
 def process_professional_shifts(rows, start_idx, header_map, nome_idx, mes, ano):
     """Processa os plantões de um profissional"""
@@ -440,7 +441,233 @@ def process_professional_shifts(rows, start_idx, header_map, nome_idx, mes, ano)
     
     # Processa plantões da linha atual
     for dia, col_idx in header_map.items():
-        if isinstance(dia, int) and 1 <= d
+        if isinstance(dia, int) and 1 <= dia <= 31:
+            if col_idx < len(current_row) and current_row[col_idx]:
+                token = clean_cell_value(current_row[col_idx])
+                if token:
+                    professional["plantoes_raw"][dia].append(token)
+    
+    # Verifica linhas subsequentes do mesmo profissional
+    idx = start_idx + 1
+    while idx < len(rows):
+        next_row = rows[idx]
+        
+        # Se encontrar novo profissional ou cabeçalho, para
+        if is_header_row(next_row):
+            break
+        
+        # Verifica se a linha pertence ao mesmo profissional
+        if nome_idx < len(next_row):
+            next_nome = clean_cell_value(next_row[nome_idx])
+            if next_nome and is_valid_professional_name(next_nome):
+                # É um novo profissional
+                break
+        
+        # Processa plantões da linha adicional
+        for dia, col_idx in header_map.items():
+            if isinstance(dia, int) and 1 <= dia <= 31:
+                if col_idx < len(next_row) and next_row[col_idx]:
+                    token = clean_cell_value(next_row[col_idx])
+                    if token:
+                        professional["plantoes_raw"][dia].append(token)
+        
+        idx += 1
+    
+    # Converte plantões raw para formato final
+    plantoes = []
+    for dia, tokens in professional["plantoes_raw"].items():
+        for token in tokens:
+            turnos = interpretar_turno(token)
+            for turno_info in turnos:
+                horarios = HORARIOS_TURNO.get(turno_info["turno"], {})
+                data_plantao = datetime(ano, mes, dia)
+                
+                if turno_info["turno"] == "NOITE (fim)":
+                    # Noite fim vai para o dia seguinte
+                    data_fim = data_plantao + timedelta(days=1)
+                    plantoes.append({
+                        "dia": data_fim.day,
+                        "data": data_fim.strftime('%d/%m/%Y'),
+                        "turno": turno_info["turno"],
+                        "inicio": horarios.get("inicio"),
+                        "fim": horarios.get("fim")
+                    })
+                else:
+                    plantoes.append({
+                        "dia": data_plantao.day,
+                        "data": data_plantao.strftime('%d/%m/%Y'),
+                        "turno": turno_info["turno"],
+                        "inicio": horarios.get("inicio"),
+                        "fim": horarios.get("fim")
+                    })
+    
+    professional["plantoes"] = dedup_plantao(plantoes)
+    del professional["plantoes_raw"]
+    
+    return professional, idx
+
+
+@app.post("/normaliza-escala-from-pdf")
+async def normaliza_escala_from_pdf(request: Request):
+    """Endpoint principal para normalizar escalas de PDF"""
+    try:
+        body = await request.json()
+        
+        # Variáveis globais para manter contexto entre páginas
+        global_unidade = None
+        global_setor = None
+        global_mes = None
+        global_ano = None
+        current_header_map = None
+        current_nome_idx = None
+        
+        all_professionals = []
+        
+        # Processa cada página
+        for page_idx, page_data in enumerate(body):
+            b64_data = page_data.get("bae64")
+            if not b64_data:
+                continue
+            
+            pdf_bytes = base64.b64decode(b64_data)
+            
+            with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+                page = doc[0]
+                
+                # Extrai texto completo da página
+                page_text = page.get_text("text")
+                
+                # Tenta extrair unidade/setor do texto
+                unidade, setor = extract_unidade_setor_from_text(page_text)
+                
+                # Tenta extrair mês/ano
+                mes, ano = parse_mes_ano(page_text)
+                
+                # Atualiza valores globais se encontrados
+                if unidade:
+                    global_unidade = unidade
+                if setor:
+                    global_setor = setor
+                if mes:
+                    global_mes = mes
+                if ano:
+                    global_ano = ano
+                
+                # Extrai todas as tabelas da página
+                all_rows = []
+                for table in page.find_tables():
+                    extracted = table.extract()
+                    if extracted:
+                        all_rows.extend(extracted)
+                
+                # Processa as linhas
+                row_idx = 0
+                while row_idx < len(all_rows):
+                    current_row = all_rows[row_idx]
+                    
+                    # Verifica se é cabeçalho
+                    if is_header_row(current_row):
+                        # Constrói novo mapeamento de cabeçalho
+                        header_map, nome_idx, header_lines = build_header_map(all_rows, row_idx)
+                        if header_map and nome_idx is not None:
+                            current_header_map = header_map
+                            current_nome_idx = nome_idx
+                        row_idx += header_lines
+                        continue
+                    
+                    # Se não tem cabeçalho válido, pula
+                    if not current_header_map or current_nome_idx is None:
+                        row_idx += 1
+                        continue
+                    
+                    # Processa profissional
+                    result = process_professional_shifts(
+                        all_rows, row_idx, current_header_map, 
+                        current_nome_idx, global_mes, global_ano
+                    )
+                    
+                    if result:
+                        professional, next_idx = result
+                        if professional and professional["plantoes"]:
+                            # Adiciona setor
+                            professional["medico_setor"] = global_setor or "NÃO INFORMADO"
+                            all_professionals.append(professional)
+                        row_idx = next_idx
+                    else:
+                        row_idx += 1
+        
+        # Verifica se encontrou dados mínimos
+        if not global_mes or not global_ano:
+            return JSONResponse(
+                content={"error": "Mês/Ano não encontrados no documento"}, 
+                status_code=400
+            )
+        
+        # Ordena plantões de cada profissional
+        for prof in all_professionals:
+            if prof["plantoes"]:
+                prof["plantoes"].sort(key=lambda p: (p["dia"], p["inicio"] or ""))
+        
+        # Monta resultado final
+        mes_nome = list(MONTH_MAP.keys())[list(MONTH_MAP.values()).index(global_mes)]
+        
+        result = [{
+            "unidade_escala": global_unidade or "NÃO INFORMADO",
+            "mes_ano_escala": f"{mes_nome}/{global_ano}",
+            "profissionais": all_professionals
+        }]
+        
+        return JSONResponse(content=result)
+        
+    except Exception as e:
+        return JSONResponse(
+            content={"error": str(e), "trace": traceback.format_exc()}, 
+            status_code=500
+        )
+
+
+@app.post("/text-to-pdf")
+async def text_to_pdf(request: Request):
+    """Endpoint para converter texto em PDF"""
+    try:
+        data = await request.json()
+        raw_text = data.get("text", "")
+        filename = data.get("filename", "saida.pdf")
+
+        if not os.path.exists(FONT_PATH):
+            raise RuntimeError(f"Fonte não encontrada em: {FONT_PATH}")
+
+        # Pré-processamento do texto
+        clean_text = raw_text.replace("\r", "").replace("\n", " ")
+        clean_text = " ".join(clean_text.split())
+        lines = [clean_text[i:i+120] for i in range(0, len(clean_text), 120)]
+
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_auto_page_break(auto=True, margin=15)
+        pdf.add_font("DejaVu", "", FONT_PATH, uni=True)
+        pdf.set_font("DejaVu", size=10)
+
+        for line in lines:
+            pdf.multi_cell(w=190, h=8, txt=line)
+
+        # Gera PDF
+        pdf_output = pdf.output(dest='S')
+        
+        # Converte para bytes
+        if isinstance(pdf_output, str):
+            pdf_bytes = pdf_output.encode('latin1')
+        elif isinstance(pdf_output, bytearray):
+            pdf_bytes = bytes(pdf_output)
+        else:
+            pdf_bytes = pdf_output
+        
+        base64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
+
+        return JSONResponse(content={"file_base64": base64_pdf, "filename": filename})
+
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
 # --- FIM normaliza-escala-from-pdf ---
 
 @app.post("/text-to-pdf")
