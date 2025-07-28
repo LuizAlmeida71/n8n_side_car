@@ -92,6 +92,8 @@ FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
 MONTH_MAP = {
     'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
+    'JUNHO': 6MONTH_MAP = {
+    'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
     'JUNHO': 6, 'JULHO': 7, 'AGOSTO': 8, 'SETEMBRO': 9, 'OUTUBRO': 10,
     'NOVEMBRO': 11, 'DEZEMBRO': 12
 }
@@ -182,28 +184,26 @@ async def normaliza_escala_from_pdf(request: Request):
             setor_match = re.search(r'UNIDADE[\s/_\-]*SETOR:\s*(.*?)\s{2,}|RESPONSÁVEL[\s/_\-]*TÉCNICO:\s*(.*?)\n', page_text, re.IGNORECASE)
             mes, ano = parse_mes_ano(page_text)
 
-            unidade = (unidade_match.group(1) or unidade_match.group(2)).strip() if unidade_match else last_unidade
-            setor_raw = (setor_match.group(1) or setor_match.group(2)).strip() if setor_match else ""
-            setor = setor_raw.replace("RESPONSÁVEL TÉCNICO", "").strip(" -:/") if setor_raw else last_setor
+            # Reset to None for each new page to force re-detection
+            unidade = unidade_match.group(1) or unidade_match.group(2) if unidade_match else None
+            setor_raw = setor_match.group(1) or setor_match.group(2) if setor_match else None
+            setor = setor_raw.replace("RESPONSÁVEL TÉCNICO", "").strip(" -:/") if setor_raw else None
 
-            if unidade: last_unidade = unidade
-            else: unidade = last_unidade
-            if setor: last_setor = setor
-            else: setor = last_setor
-            if mes: last_mes = mes
-            if ano: last_ano = ano
+            # Only update last_ values if current page has a match
+            if unidade:
+                last_unidade = unidade.strip()
+            if setor:
+                last_setor = setor.strip()
+            if mes:
+                last_mes = mes
+            if ano:
+                last_ano = ano
 
-            # Reset setor and unidade for each new page to avoid carryover
-            if unidade_match or setor_match:
-                pagina_unidade_setor_map[page_idx] = {
-                    "unidade": unidade or last_unidade,
-                    "setor": setor or last_setor
-                }
-            else:
-                pagina_unidade_setor_map[page_idx] = {
-                    "unidade": last_unidade,
-                    "setor": last_setor
-                }
+            # Store the current page's values, falling back to last_ values if not found
+            pagina_unidade_setor_map[page_idx] = {
+                "unidade": last_unidade or "NÃO INFORMADO",
+                "setor": last_setor or "NÃO INFORMADO"
+            }
 
         if last_mes is None or last_ano is None:
             return JSONResponse(content={"error": "Mês/Ano não encontrados."}, status_code=400)
