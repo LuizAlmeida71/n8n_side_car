@@ -89,183 +89,140 @@ async def split_pdf(file: UploadFile = File(...)):
         
 # --- INÍCIO normaliza-escala-from-pdf ---
 
-app = FastAPI()
-
 TURNOS = {
     "MANHÃ": {"inicio": "07:00", "fim": "13:00"},
     "TARDE": {"inicio": "13:00", "fim": "19:00"},
     "NOITE": {"inicio": "19:00", "fim": "07:00"},
     "NOITE (início)": {"inicio": "19:00", "fim": "01:00"},
     "NOITE (fim)": {"inicio": "01:00", "fim": "07:00"},
+    "N": {"inicio": "19:00", "fim": "07:00"},
+    "n": {"inicio": "19:00", "fim": "01:00"},
+    "M": {"inicio": "07:00", "fim": "13:00"},
+    "T": {"inicio": "13:00", "fim": "19:00"},
+    "D": {"inicio": "07:00", "fim": "19:00"},
 }
 
-def extrair_texto_pdf(pdf_file):
-    texto_paginas = []
-    with fitz.open(stream=pdf_file, filetype="pdf") as doc:
-        for pagina in doc:
-            texto_paginas.append(pagina.get_text())
-    return texto_paginas
+def extrair_texto_pdf(file: BytesIO):
+    reader = PdfReader(file)
+    return [page.extract_text() for page in reader.pages]
 
-def identificar_unidade_e_setor(texto):
-    unidade_escala = ""
-    medico_setor = ""
-    padrao_unidade = re.search(r"UNIDADE:\s*(.+)", texto)
-    padrao_setor = re.search(r"UNIDADE SETOR:\s*(.+)", texto)
+def parse_mes_ano(texto):
+    match = re.search(r"MÊS\s*:\s*(\w+)\s*/\s*(\d{4})", texto)
+    if match:
+        mes_str, ano = match.groups()
+        mes = datetime.strptime(mes_str[:3], "%b").month if len(mes_str) > 3 else datetime.strptime(mes_str, "%b").month
+        return mes, int(ano)
+    return None, None
 
-    if padrao_unidade:
-        unidade_escala = padrao_unidade.group(1).strip()
+def parse_setor_unidade(texto):
+    unidade = None
+    setor = None
+    unidade_match = re.search(r"UNIDADE\s*:\s*(.*)", texto)
+    setor_match = re.search(r"UNIDADE SETOR\s*:\s*(.*)", texto)
+    if unidade_match:
+        unidade = unidade_match.group(1).strip()
+    if setor_match:
+        setor = setor_match.group(1).strip()
+    return unidade, setor
 
-    if padrao_setor:
-        medico_setor = padrao_setor.group(1).strip()
-
-    return unidade_escala, medico_setor
-
-def obter_dias_mes(texto):
+def parse_medicos(texto, mes, ano, unidade_escala, medico_setor):
     linhas = texto.split("\n")
-    for linha in linhas:
-        dias = re.findall(r"\b\d{1,2}\b", linha)
-        if len(dias) >= 28:
-            return [int(d) for d in dias]
-    return []
-
-def normalizar_plantao(dia, entrada, saida, mes_ano, turno_label=None):
-    data_inicio = datetime.strptime(f"{dia}/{mes_ano}", "%d/%m/%Y")
-    if turno_label == "NOITE (início)":
-        return {
-            "dia": dia,
-            "data": data_inicio.strftime("%d/%m/%Y"),
-            "turno": "NOITE (início)",
-            "inicio": TURNOS["NOITE (início")["inicio"],
-            "fim": TURNOS["NOITE (início)"]["fim"],
-        }
-    elif turno_label == "NOITE (fim)":
-        data_inicio += timedelta(days=1)
-        return {
-            "dia": data_inicio.day,
-            "data": data_inicio.strftime("%d/%m/%Y"),
-            "turno": "NOITE (fim)",
-            "inicio": TURNOS["NOITE (fim)"]["inicio"],
-            "fim": TURNOS["NOITE (fim)"]["fim"],
-        }
-    else:
-        return {
-            "dia": dia,
-            "data": data_inicio.strftime("%d/%m/%Y"),
-            "turno": turno_label,
-            "inicio": entrada,
-            "fim": saida,
-        }
-
-def extrair_plantao_por_linha(linha, dias, mes_ano):
-    plantoes = []
-    for i, entrada in enumerate(linha):
-        dia = dias[i] if i < len(dias) else None
-        entrada = entrada.strip().upper()
-
-        if not entrada or entrada in {"FÉRIAS", "ATESTADO"}:
-            continue
-
-        if "N" in entrada:
-            if entrada == "N":
-                plantoes.append(normalizar_plantao(dia, None, None, mes_ano, "NOITE (início)"))
-                plantoes.append(normalizar_plantao(dia, None, None, mes_ano, "NOITE (fim)"))
-            elif entrada == "n":
-                plantoes.append(normalizar_plantao(dia, TURNOS["NOITE (início)"]["inicio"], TURNOS["NOITE (início)"]["fim"], mes_ano, "NOITE"))
-        elif entrada == "M":
-            plantoes.append(normalizar_plantao(dia, TURNOS["MANHÃ"]["inicio"], TURNOS["MANHÃ"]["fim"], mes_ano, "MANHÃ"))
-        elif entrada == "T":
-            plantoes.append(normalizar_plantao(dia, TURNOS["TARDE"]["inicio"], TURNOS["TARDE"]["fim"], mes_ano, "TARDE"))
-        elif entrada == "D":
-            plantoes.append(normalizar_plantao(dia, TURNOS["MANHÃ"]["inicio"], TURNOS["NOITE"]["fim"], mes_ano, "DIA TODO"))
-        elif entrada == "PJ":
-            plantoes.append(normalizar_plantao(dia, "07:00", "19:00", mes_ano, "PJ"))
-        elif entrada == "PJ N":
-            plantoes.append(normalizar_plantao(dia, TURNOS["NOITE (início)"]["inicio"], TURNOS["NOITE (início)"]["fim"], mes_ano, "PJ NOITE (início)"))
-            plantoes.append(normalizar_plantao(dia, TURNOS["NOITE (fim)"]["inicio"], TURNOS["NOITE (fim)"]["fim"], mes_ano, "PJ NOITE (fim)"))
-
-    return plantoes
-
-@app.post("/normaliza-escala-from-pdf")
-async def normaliza_escala_from_pdf(file: UploadFile = File(...)):
-    conteudo = await file.read()
-    paginas = extrair_texto_pdf(conteudo)
-
     resultados = []
-    for pagina_texto in paginas:
-        unidade_escala, medico_setor = identificar_unidade_e_setor(pagina_texto)
-        dias = obter_dias_mes(pagina_texto)
+    headers = []
+    dias_header = []
 
-        # Extrair mês/ano
-        match_mes = re.search(r"MÊS:\s*(\w+/\d{4})", pagina_texto)
-        mes_ano = match_mes.group(1) if match_mes else "01/1900"
+    for i, linha in enumerate(linhas):
+        if re.search(r"\bNOME COMPLETO\b", linha):
+            headers = linhas[i:i+3]
+            dias_header = linhas[i+2] if len(linhas) > i+2 else ""
+            break
 
-        linhas = pagina_texto.split("\n")
-        for i, linha in enumerate(linhas):
-            if re.match(r"^\d+\s+[A-Z ]{3,}", linha):
-                colunas = linha.split()
-                nome = " ".join(colunas[1:-5])
-                crm = colunas[-1]
-                cargo = colunas[-6]
-                vinculo = colunas[-3]
+    dias = list(map(int, re.findall(r"\b\d{1,2}\b", dias_header)))
+    
+    i = 0
+    while i < len(linhas):
+        if re.match(r"^\d+\s", linhas[i]):
+            medico = {}
+            partes = linhas[i].split()
+            medico["medico_nome"] = " ".join(partes[1:])
+            medico["medico_crm"] = ""
+            medico["medico_especialidade"] = ""
+            medico["medico_vinculo"] = ""
+            medico["plantao"] = []
+            medico["unidade_escala"] = unidade_escala
+            medico["medico_setor"] = medico_setor
 
-                linha_plantao = linhas[i + 1].split() if i + 1 < len(linhas) else []
-                plantoes = extrair_plantao_por_linha(linha_plantao, dias, mes_ano)
+            j = i + 1
+            bloco_texto = linhas[j] if j < len(linhas) else ""
+            if "MÉDICO" in bloco_texto:
+                medico["medico_especialidade"] = "MÉDICO"
 
-                resultados.append({
-                    "medico_nome": nome,
-                    "medico_crm": crm,
-                    "medico_especialidade": cargo,
-                    "medico_vinculo": vinculo,
-                    "medico_setor": medico_setor,
-                    "unidade_escala": unidade_escala,
-                    "plantoes": plantoes
-                })
+            vinculo_match = re.search(r"\b(PJ|CLT|SELETIVO.*?)\b", bloco_texto)
+            if vinculo_match:
+                medico["medico_vinculo"] = vinculo_match.group(1).strip()
+
+            crm_match = re.findall(r"\d{4,}", bloco_texto)
+            if crm_match:
+                medico["medico_crm"] = crm_match[-1]
+
+            turnos_linha = linhas[j + 1] if j + 1 < len(linhas) else ""
+            turnos = re.findall(r"[A-Z]|[a-z]", turnos_linha)
+
+            for idx, turno in enumerate(turnos):
+                if idx >= len(dias):
+                    continue
+                dia = dias[idx]
+                data = datetime(ano, mes, dia).strftime("%d/%m/%Y")
+                if turno == "N":
+                    # NOITE (início)
+                    inicio_data = datetime(ano, mes, dia).strftime("%d/%m/%Y")
+                    medico["plantao"].append({
+                        "dia": dia,
+                        "data": inicio_data,
+                        "turno": "NOITE (início)",
+                        "inicio": TURNOS["NOITE (início)"]["inicio"],
+                        "fim": TURNOS["NOITE (início)"]["fim"],
+                    })
+                    # NOITE (fim)
+                    data_fim = datetime(ano, mes, dia) + timedelta(days=1)
+                    medico["plantao"].append({
+                        "dia": data_fim.day,
+                        "data": data_fim.strftime("%d/%m/%Y"),
+                        "turno": "NOITE (fim)",
+                        "inicio": TURNOS["NOITE (fim)"]["inicio"],
+                        "fim": TURNOS["NOITE (fim)"]["fim"],
+                    })
+                elif turno in TURNOS:
+                    medico["plantao"].append({
+                        "dia": dia,
+                        "data": data,
+                        "turno": turno,
+                        "inicio": TURNOS[turno]["inicio"],
+                        "fim": TURNOS[turno]["fim"],
+                    })
+
+            resultados.append(medico)
+            i = j + 2
+        else:
+            i += 1
 
     return resultados
 
-# --- FIM normaliza-escala-from-pdf ---
+@app.post("/normaliza-escala-from-pdf")
+async def normaliza_escala(file: UploadFile = File(...)):
+    content = await file.read()
+    texto_por_pagina = extrair_texto_pdf(BytesIO(content))
+    todos_medicos = []
 
-@app.post("/text-to-pdf")
-async def text_to_pdf(request: Request):
-    try:
-        data = await request.json()
-        raw_text = data.get("text", "")
-        filename = data.get("filename", "saida.pdf")
+    for pagina_texto in texto_por_pagina:
+        mes, ano = parse_mes_ano(pagina_texto)
+        unidade_escala, medico_setor = parse_setor_unidade(pagina_texto)
+        if not mes or not ano:
+            continue
+        medicos = parse_medicos(pagina_texto, mes, ano, unidade_escala, medico_setor)
+        todos_medicos.extend(medicos)
 
-        if not os.path.exists(FONT_PATH):
-            raise RuntimeError(f"Fonte não encontrada em: {FONT_PATH}")
-
-        # Pré-processamento: substitui múltiplos \n e quebras "duplas"
-        clean_text = raw_text.replace("\r", "").replace("\n", " ")
-        clean_text = " ".join(clean_text.split())  # remove múltiplos espaços
-        lines = [clean_text[i:i+120] for i in range(0, len(clean_text), 120)]
-
-        pdf = FPDF()
-        pdf.add_page()
-        pdf.set_auto_page_break(auto=True, margin=15)
-        pdf.add_font("DejaVu", "", FONT_PATH, uni=True)
-        pdf.set_font("DejaVu", size=10)
-
-        for line in lines:
-            pdf.multi_cell(w=190, h=8, txt=line)
-
-        # CORREÇÃO: Tratamento adequado do output do FPDF
-        pdf_output = pdf.output(dest='S')
-        
-        # Converte para bytes se necessário
-        if isinstance(pdf_output, str):
-            pdf_bytes = pdf_output.encode('latin1')
-        elif isinstance(pdf_output, bytearray):
-            pdf_bytes = bytes(pdf_output)
-        else:
-            pdf_bytes = pdf_output
-        
-        base64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
-
-        return JSONResponse(content={"file_base64": base64_pdf, "filename": filename})
-
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+    return todos_medicos
 
 # --- Início normaliza-escala-json ---
 # --- CONFIGURAÇÕES E MAPEAMENTOS GLOBAIS ---
