@@ -100,8 +100,6 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 import fitz
 
-app = FastAPI()
-
 MONTH_MAP = {
     'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
     'JUNHO': 6, 'JULHO': 7, 'AGOSTO': 8, 'SETEMBRO': 9, 'OUTUBRO': 10,
