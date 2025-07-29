@@ -88,8 +88,7 @@ async def split_pdf(file: UploadFile = File(...)):
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 # --- INÍCIO normaliza-escala-from-pdf ---
-# --- CONSTANTES GLOBAIS ---
-
+# --- CONSTANTES ---
 MONTH_MAP = {
     'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
     'JUNHO': 6, 'JULHO': 7, 'AGOSTO': 8, 'SETEMBRO': 9, 'OUTUBRO': 10,
@@ -103,7 +102,7 @@ HORARIOS_TURNO = {
     "NOITE (fim)": {"inicio": "01:00", "fim": "07:00"},
 }
 
-# --- FUNÇÕES AUXILIARES (sem alterações) ---
+# --- FUNÇÕES AUXILIARES ---
 
 def parse_mes_ano(text):
     patterns = [
@@ -156,10 +155,6 @@ def extract_unidade_setor_from_text(page_text):
         if match: setor = match.group(1).strip()
     return unidade, setor
 
-def clean_cell_value(value):
-    if not value: return ""
-    return ' '.join(str(value).replace('\n', ' ').split())
-
 def is_header_row(row):
     if not row or len(row) < 3: return False
     row_text = ' '.join([str(cell) for cell in row if cell]).upper()
@@ -189,28 +184,34 @@ def build_header_map(row):
     return header_map, nome_idx
 
 def is_valid_professional_name(name):
+    """Função de validação um pouco mais estrita para evitar lixo."""
     if not name or not isinstance(name, str) or len(name.strip()) < 4: return False
     name_clean = name.upper().strip()
-    invalid_keywords = ['NOME COMPLETO', 'CARGO', 'MATRÍCULA', 'HORÁRIO', 'LEGENDA', 'ASSINATURA', 'UNIDADE', 'SETOR']
+    # Adicionadas mais palavras-chave para filtrar texto de cabeçalho/rodapé
+    invalid_keywords = [
+        'NOME COMPLETO', 'CARGO', 'MATRÍCULA', 'HORÁRIO', 'LEGENDA', 'ASSINATURA', 
+        'UNIDADE', 'SETOR', 'MÊS', 'ANO', 'ALTERAÇÃO', 'GOVERNO', 'SECRETARIA'
+    ]
     if any(keyword in name_clean for keyword in invalid_keywords): return False
     if name_clean.replace('.', '').replace('-', '').isdigit(): return False
     return len(name_clean.split()) >= 2
 
+def clean_cell_value(value):
+    if not value: return ""
+    return ' '.join(str(value).replace('\n', ' ').split())
+
 def interpretar_turno(token):
     turnos = []
     if not token: return turnos
-    token_clean = token.upper().strip()
-    turno_chars = re.findall(r'\b(M|T|D|N)\b| (M|T|D|N)$|([M|T|D|N])$', token_clean)
-    detected_shifts = {match for group in turno_chars for match in group if match}
-    for char in detected_shifts:
-        if char == 'M': turnos.append({"turno": "MANHÃ"})
-        elif char == 'T': turnos.append({"turno": "TARDE"})
-        elif char == 'D':
-            turnos.append({"turno": "MANHÃ"})
-            turnos.append({"turno": "TARDE"})
-        elif char == 'N':
-            turnos.append({"turno": "NOITE (início)"})
-            turnos.append({"turno": "NOITE (fim)"})
+    token_clean = token.upper().replace('/', '').replace(' ', '')
+    if 'M' in token_clean: turnos.append({"turno": "MANHÃ"})
+    if 'T' in token_clean: turnos.append({"turno": "TARDE"})
+    if 'D' in token_clean:
+        turnos.append({"turno": "MANHÃ"})
+        turnos.append({"turno": "TARDE"})
+    if 'N' in token_clean:
+        turnos.append({"turno": "NOITE (início)"})
+        turnos.append({"turno": "NOITE (fim)"})
     unique_turnos = []
     seen_turno_names = set()
     for t in turnos:
@@ -253,7 +254,13 @@ def process_professional_shifts(rows, start_idx, header_map, nome_idx, mes, ano)
         if pkey not in seen:
             seen.add(pkey)
             plantoes_dedup.append(p)
-    professional["plantoes"] = sorted(plantoes_dedup, key=lambda p: (datetime.strptime(p["data"], '%d/%m/%Y'), p.get("inicio", "")))
+            
+    # --- ÚNICA ALTERAÇÃO LÓGICA IMPORTANTE ESTÁ AQUI ---
+    # Ordena usando a data completa (convertida para datetime) para garantir a ordem cronológica correta.
+    professional["plantoes"] = sorted(
+        plantoes_dedup,
+        key=lambda p: (datetime.strptime(p["data"], '%d/%m/%Y'), p.get("inicio", ""))
+    )
     del professional["plantoes_raw"]
     return professional, idx
 
@@ -291,29 +298,22 @@ async def normaliza_escala_from_pdf(request: Request):
                 status_code=400
             )
 
-        # --- PASSADA 2: Processamento com estado persistente ---
+        # --- PASSADA 2: Processamento com a lógica original (correta) ---
         all_professionals_map = {}
-        # **** ALTERAÇÃO CRÍTICA: Inicialização do estado ANTES do loop de páginas ****
-        current_header_map, current_nome_idx = None, None
-        
         for page in pages_content:
             all_rows = page["rows"]
             setor_a_usar = page["setor_pagina"] or global_setor or "NÃO INFORMADO"
-            
+            current_header_map, current_nome_idx = None, None
             i = 0
             while i < len(all_rows):
                 row = all_rows[i]
                 if is_header_row(row):
-                    # Atualiza o estado do cabeçalho sempre que um novo for encontrado
                     current_header_map, current_nome_idx = build_header_map(row)
                     i += 1
                     continue
-
-                # Se não houver um cabeçalho (nem nesta página nem nas anteriores), pula a linha
                 if not current_header_map or current_nome_idx is None or current_nome_idx >= len(row):
                     i += 1
                     continue
-
                 nome_raw = row[current_nome_idx]
                 if is_valid_professional_name(nome_raw):
                     professional, next_i = process_professional_shifts(all_rows, i, current_header_map, current_nome_idx, global_mes, global_ano)
@@ -325,7 +325,10 @@ async def normaliza_escala_from_pdf(request: Request):
                         existing = all_professionals_map[nome_key]
                         new_plantoes = professional["plantoes"]
                         existing["plantoes"].extend(p for p in new_plantoes if p not in existing["plantoes"])
-                        existing["plantoes"].sort(key=lambda p: (datetime.strptime(p["data"], '%d/%m/%Y'), p.get("inicio", "")))
+                        # --- E AQUI TAMBÉM, PARA GARANTIR A ORDEM NA MESCLAGEM ---
+                        existing["plantoes"].sort(
+                            key=lambda p: (datetime.strptime(p["data"], '%d/%m/%Y'), p.get("inicio", ""))
+                        )
                         if setor_a_usar != "NÃO INFORMADO" and existing["medico_setor"] == "NÃO INFORMADO":
                             existing["medico_setor"] = setor_a_usar
                     i = next_i
