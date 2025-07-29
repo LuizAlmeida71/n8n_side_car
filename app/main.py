@@ -91,14 +91,31 @@ async def split_pdf(file: UploadFile = File(...)):
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 # --- INÍCIO normaliza-escala-from-pdf ---
-# Mapeamento de meses (como já tinha)
+import re
+import base64
+import traceback
+from datetime import datetime, timedelta
+from collections import defaultdict
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+import fitz
+
+app = FastAPI()
+
 MONTH_MAP = {
     'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
     'JUNHO': 6, 'JULHO': 7, 'AGOSTO': 8, 'SETEMBRO': 9, 'OUTUBRO': 10,
     'NOVEMBRO': 11, 'DEZEMBRO': 12
 }
 
-# Horários padrão para turnos
+def parse_mes_ano(text):
+    match = re.search(r'MÊS[\s/:]*([A-ZÇÃ]+)[\s/]*(\d{4})', text.upper())
+    if not match: return None, None
+    mes_nome, ano_str = match.groups()
+    mes = MONTH_MAP.get(mes_nome)
+    ano = int(ano_str)
+    return mes, ano
+
 TURNOS = {
     "MANHÃ": {"inicio": "07:00", "fim": "13:00"},
     "TARDE": {"inicio": "13:00", "fim": "19:00"},
@@ -106,28 +123,19 @@ TURNOS = {
     "NOITE (fim)": {"inicio": "01:00", "fim": "07:00"},
 }
 
-# -----------------------
-# Base de padrões conhecidos
-# -----------------------
-
 HEADER_PATTERNS = {
-    # Exemplo de padrão tipo A
     "tipo_a": [
         "NOME COMPLETO", "CARGO", "MATRÍCULA", "VÍNCULO", "CH", "HORÁRIO",
         "CONSELHO DE CLASSE"
     ],
-    # Exemplo de padrão tipo B (adicione outros conforme encontrar)
-    # "tipo_b": [...]
 }
 
 def header_similarity(header_row, pattern):
-    """Retorna similaridade (contagem de colunas iguais)"""
     header_norm = [str(cell).replace('\n', ' ').strip().upper() for cell in header_row]
     matches = sum(1 for a, b in zip(header_norm, pattern) if a == b)
     return matches / max(len(pattern), len(header_norm))
 
 def find_pattern(header_row):
-    """Compara header com base de padrões e retorna o melhor match ou None"""
     best_pattern = None
     best_score = 0
     for name, pattern in HEADER_PATTERNS.items():
@@ -135,7 +143,6 @@ def find_pattern(header_row):
         if score > best_score:
             best_score = score
             best_pattern = name
-    # Considere match válido só se acima de certo limiar
     return best_pattern if best_score > 0.6 else None
 
 def is_valid_professional_name(name):
@@ -146,7 +153,6 @@ def is_valid_professional_name(name):
     return len(name.split()) >= 2 or name.isupper()
 
 def interpretar_turno(token):
-    """Idêntico ao último código, mas você pode expandir aqui"""
     token_clean = token.replace('\n', '').replace('/', '').replace(' ', '').upper()
     turnos = []
     for c in token_clean:
@@ -172,12 +178,7 @@ def dedup_plantao(lista):
             result.append(p)
     return result
 
-# -----------------------
-# Funções por padrão de cabeçalho
-# -----------------------
-
 def processar_tipo_a(all_table_rows, header_map, nome_idx, last_ano, last_mes, last_setor):
-    """Função para extrair dados do padrão tipo A"""
     profissionais_data = defaultdict(lambda: {"info_rows": []})
     idx_linha = 0
     last_name = None
@@ -260,7 +261,6 @@ def processar_tipo_a(all_table_rows, header_map, nome_idx, last_ano, last_mes, l
 async def normaliza_escala_from_pdf(request: Request):
     try:
         body = await request.json()
-        # Aceita dict com "pages", lista simples ou lista de dicts
         if isinstance(body, dict) and "pages" in body:
             pages = body["pages"]
         elif isinstance(body, list):
@@ -323,20 +323,15 @@ async def normaliza_escala_from_pdf(request: Request):
 
                 # Fluxo do algoritmo do desenho
                 if header_row:
-                    # Compara padrão em memória (último visto)
                     if last_header_row is not None and header_row == last_header_row:
                         pattern_name = last_pattern_name
                     else:
-                        # Compara com base de padrões
                         pattern_name = find_pattern(header_row)
                         if not pattern_name:
-                            # ERRO de ausência de padrão OU inserir novo padrão na base
-                            # Por padrão, vamos inserir
                             HEADER_PATTERNS[f"novo_padrao_{len(HEADER_PATTERNS)+1}"] = header_row
                             pattern_name = f"novo_padrao_{len(HEADER_PATTERNS)}"
                     last_pattern_name = pattern_name
                     last_header_row = header_row
-                    # Monta header_map
                     header_map = {}
                     for i, col_name in enumerate(header_row):
                         if "NOME COMPLETO" in col_name: header_map["NOME COMPLETO"] = i
@@ -346,11 +341,9 @@ async def normaliza_escala_from_pdf(request: Request):
                         elif col_name.isdigit(): header_map[int(col_name)] = i
                     last_header_map = header_map
                     nome_idx = header_map.get("NOME COMPLETO")
-                    # Adiciona linha de cabeçalho e dados
                     all_table_rows.append(header_row)
                     all_table_rows.extend(tabela[tabela.index(row)+1:])
                 else:
-                    # Se não tem cabeçalho, usa padrão em memória
                     pattern_name = last_pattern_name
                     header_row = last_header_row
                     header_map = last_header_map
@@ -359,7 +352,6 @@ async def normaliza_escala_from_pdf(request: Request):
                         all_table_rows.append(header_row)
                         all_table_rows.extend(tabela)
 
-        # Encaminha para nó do tipo de cabeçalho
         if not last_pattern_name:
             return JSONResponse(content={"error": "Nenhum padrão de cabeçalho detectado em nenhuma página."}, status_code=400)
         elif last_pattern_name.startswith("tipo_a"):
