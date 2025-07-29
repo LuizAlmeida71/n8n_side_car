@@ -91,13 +91,23 @@ async def split_pdf(file: UploadFile = File(...)):
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 # --- INÍCIO normaliza-escala-from-pdf ---
+import re
+import base64
+import traceback
+from datetime import datetime, timedelta
+from collections import defaultdict
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+import fitz
+
+app = FastAPI()
+
 MONTH_MAP = {
     'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
     'JUNHO': 6, 'JULHO': 7, 'AGOSTO': 8, 'SETEMBRO': 9, 'OUTUBRO': 10,
     'NOVEMBRO': 11, 'DEZEMBRO': 12
 }
 
-# Horários fixos do modelo convencional
 TURNOS = {
     "MANHÃ": {"inicio": "07:00", "fim": "13:00"},
     "TARDE": {"inicio": "13:00", "fim": "19:00"},
@@ -114,14 +124,6 @@ def parse_mes_ano(text):
     return mes, ano
 
 def interpretar_turno(token):
-    """
-    Interpreta uma string de turnos e retorna todos os turnos daquele dia conforme regras:
-    M = Manhã (07:00-13:00)
-    T = Tarde (13:00-19:00)
-    N = Noite (19:00-01:00) + (01:00-07:00) (dois lançamentos)
-    D = Manhã e Tarde (07:00-13:00 e 13:00-19:00)
-    Combinações: Ex. 'MTN' -> todos
-    """
     token_clean = token.replace('\n', '').replace('/', '').replace(' ', '').upper()
     turnos = []
     for c in token_clean:
@@ -158,9 +160,14 @@ def dedup_plantao(lista):
 async def normaliza_escala_from_pdf(request: Request):
     try:
         body = await request.json()
-        if not (isinstance(body, dict) and "pages" in body and isinstance(body["pages"], list) and body["pages"]):
+        # Aceita dict com "pages" OU lista simples
+        if isinstance(body, dict) and "pages" in body:
+            pages = body["pages"]
+        elif isinstance(body, list):
+            pages = body
+        else:
             return JSONResponse(content={
-                "error": "Formato de entrada inválido: esperado { 'pages': [ { 'file_base64': ... }, ... ] }"
+                "error": "Formato de entrada inválido: esperado uma lista de páginas ou um dict com a chave 'pages'"
             }, status_code=400)
 
         all_table_rows = []
@@ -170,26 +177,27 @@ async def normaliza_escala_from_pdf(request: Request):
         last_unidade = None
         last_mes, last_ano = None, None
 
-        for page_idx, page_data in enumerate(body["pages"]):
-            b64_data = page_data.get("file_base64")
+        for page_idx, page_data in enumerate(pages):
+            b64_data = (
+                page_data.get("file_base64") or
+                page_data.get("bae64") or
+                page_data.get("base64")
+            )
             if not b64_data:
                 return JSONResponse(content={
-                    "error": f"Página {page_idx+1} sem 'file_base64' no input."
+                    "error": f"Página {page_idx+1} sem campo base64 ('file_base64', 'bae64' ou 'base64')."
                 }, status_code=400)
             pdf_bytes = base64.b64decode(b64_data)
             with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
                 page = doc[0]
                 page_text = page.get_text("text")
 
-                # Extração robusta do SETOR (pega tudo após "UNIDADE SETOR:" até fim da linha)
                 setor_match = re.search(r'UNIDADE\s*SETOR[:\s\-]*([^\n\r]+)', page_text, re.IGNORECASE)
                 setor = setor_match.group(1).strip() if setor_match else last_setor
 
-                # UNIDADE
                 unidade_match = re.search(r'UNIDADE[:\s\-]*([^\n\r]+)', page_text, re.IGNORECASE)
                 unidade = unidade_match.group(1).strip() if unidade_match else last_unidade
 
-                # MÊS/ANO
                 mes, ano = parse_mes_ano(page_text)
                 if mes is None: mes = last_mes
                 if ano is None: ano = last_ano
@@ -204,11 +212,9 @@ async def normaliza_escala_from_pdf(request: Request):
                     if extracted: tabelas.append(extracted)
                 tabela = tabelas[0] if tabelas else []
 
-                # Procura linha de cabeçalho
                 header_row = None
                 for row in tabela:
                     if row and any("NOME" in str(cell).upper() and "COMPLETO" in str(cell).upper() for cell in row):
-                        # Corrige deslocamento por índice se presente
                         if row[0] is None or (isinstance(row[0], str) and row[0].strip().isdigit()):
                             header_row = row[1:]
                         else:
@@ -306,7 +312,6 @@ async def normaliza_escala_from_pdf(request: Request):
                     turnos = interpretar_turno(token)
                     data_plantao = datetime(last_ano, last_mes, dia)
                     for turno_info in turnos:
-                        # Se for "NOITE (fim)", joga para o dia seguinte
                         if turno_info["turno"] == "NOITE (fim)":
                             data_fim = data_plantao + timedelta(days=1)
                             profissional_obj["plantoes"].append({
@@ -325,7 +330,6 @@ async def normaliza_escala_from_pdf(request: Request):
                                 "fim": turno_info["fim"]
                             })
             profissional_obj["plantoes"] = dedup_plantao(profissional_obj["plantoes"])
-            # Ordena os plantões pelo horário de início
             profissional_obj["plantoes"].sort(key=lambda p: (p["dia"], p["inicio"] or ""))
             if profissional_obj["plantoes"]:
                 lista_profissionais_final.append(profissional_obj)
@@ -341,7 +345,7 @@ async def normaliza_escala_from_pdf(request: Request):
         return JSONResponse(content=final_output)
 
     except Exception as e:
-        return JSONResponse(content={"error": str(e), "trace": traceback.format_exc()}, status_code=500)
+        return JSONResponse(content={"error": str(e), "trace": traceback.format_exc()}, status_code=500
 
 # --- FIM normaliza-escala-from-pdf ---
 
