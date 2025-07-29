@@ -91,7 +91,6 @@ async def split_pdf(file: UploadFile = File(...)):
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 # --- INÍCIO normaliza-escala-from-pdf ---
-
 MONTH_MAP = {m: i+1 for i, m in enumerate(['JANEIRO', 'FEVEREIRO', 'MARÇO', 'ABRIL', 'MAIO', 'JUNHO', 'JULHO', 'AGOSTO', 'SETEMBRO', 'OUTUBRO', 'NOVEMBRO', 'DEZEMBRO'])}
 
 HORARIOS_TURNO = {
@@ -161,7 +160,7 @@ async def normaliza_escala_from_pdf(request: Request):
             return JSONResponse({"error": "Cabeçalho não encontrado."}, status_code=400)
 
         dias_row = all_table_rows[header_row_idx + 1]
-        header_map = {idx: col for idx, col in enumerate(dias_row) if str(col).strip().isdigit()}
+        header_map = {idx: col.strip() for idx, col in enumerate(dias_row) if isinstance(col, (str, int)) and str(col).strip().isdigit()}
         nome_idx = next(idx for idx, col in enumerate(all_table_rows[header_row_idx]) if "NOME COMPLETO" in str(col).upper())
 
         profissionais_data = defaultdict(lambda: defaultdict(list))
@@ -200,7 +199,6 @@ async def normaliza_escala_from_pdf(request: Request):
 
     except Exception as e:
         return JSONResponse({"error": str(e), "trace": traceback.format_exc()}, status_code=500)
-
 
 # --- FIM normaliza-escala-from-pdf ---
 
