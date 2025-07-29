@@ -249,6 +249,23 @@ async def text_to_pdf(request: Request):
 
 
 # --- INICIO normaliza-escala-HC ---
+import base64
+import re
+import traceback
+from collections import defaultdict
+from datetime import datetime, timedelta
+
+import fitz  # PyMuPDF
+import uvicorn
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+
+# --- Inicialização da Aplicação ---
+app = FastAPI(
+    title="API de Normalização de Escalas",
+    description="Processa PDFs de escalas médicas e extrai os dados em formato JSON."
+)
+
 # --- Constantes e Mapas ---
 MONTH_MAP = {
     'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
@@ -333,8 +350,9 @@ def dedup_plantao(lista_plantoes: list):
 
 # --- Endpoint da API ---
 
-@app.post("/normaliza-normaliza-escala-HC")
-async def normaliza_normaliza-escala-HC(request: Request):
+# CORREÇÃO: O path e o nome da função devem ser consistentes e válidos.
+@app.post("/normaliza-escala-from-pdf")
+async def normaliza_escala_from_pdf(request: Request):
     try:
         body = await request.json()
         full_text = ""
@@ -505,4 +523,8 @@ async def normaliza_normaliza-escala-HC(request: Request):
             content={"error": str(e), "trace": traceback.format_exc()},
             status_code=500
         )
+
+# --- Bloco de Execução ---
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
 # --- FIM normaliza-escala-HC ---
