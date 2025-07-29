@@ -105,31 +105,76 @@ HORARIOS_TURNO = {
 
 # --- FUNÇÕES AUXILIARES GERAIS ---
 
+def parse_mes_ano(text):
+    """Extrai mês e ano do texto com múltiplos padrões."""
+    patterns = [
+        r'MÊS[\s/:]*([A-ZÇÃ]+)[\s/]*(\d{4})', r'MES/ANO:\s*([A-ZÇÃ]+)\s*/\s*(\d{4})',
+        r'([A-ZÇÃ]+)/(\d{4})', r'MÊS:\s*([A-ZÇÃ]+)', r'([A-ZÇÃ]+)\s+(\d{4})'
+    ]
+    text_upper = text.upper()
+    mes, ano = None, None
+    for pattern in patterns:
+        match = re.search(pattern, text_upper)
+        if match:
+            groups = match.groups()
+            mes_val = MONTH_MAP.get(groups[0].strip())
+            if mes_val: mes = mes_val
+            if len(groups) > 1 and groups[1]:
+                try: ano = int(groups[1])
+                except (ValueError, TypeError): pass
+            if mes and ano: return mes, ano
+    if not ano:
+        year_match = re.search(r'\b(20\d{2})\b', text)
+        if year_match: ano = int(year_match.group(1))
+    return mes, ano
+
+def extract_unidade_setor_from_text(page_text):
+    """Extrai UNIDADE e SETOR de forma robusta a partir do texto da página."""
+    unidade, setor = None, None
+    unidade_patterns = [
+        r'UNIDADE:\s*([^/\n]+?)(?:\s*UNIDADE\s*SETOR:|/|$)',
+        r'UNIDADE CENTRAL\s*([^/\n]+?)(?:\s*UNIDADE\s*SETOR:|/|$)'
+    ]
+    setor_patterns = [
+        r'UNIDADE\s*/\s*SETOR:\s*([^/\n]+?)(?:/|$)',
+        r'UNIDADE\s*SETOR:\s*([^/\n]+?)(?:/|RESPONSÁVEL TÉCNICO|$)',
+        r'SETOR:\s*CE[T|P][^/\n]+'
+    ]
+    for pattern in unidade_patterns:
+        match = re.search(pattern, page_text, re.IGNORECASE)
+        if match:
+            unidade = match.group(1).strip().replace('SETOR:', '').strip()
+            break
+    for pattern in setor_patterns:
+        match = re.search(pattern, page_text, re.IGNORECASE)
+        if match:
+            setor = match.group(1).strip().replace('RESPONSÁVEL TÉCNICO', '').strip(' /')
+            break
+    if not unidade:
+        match = re.search(r'UNIDADE:\s*([^\n]+)', page_text, re.IGNORECASE)
+        if match: unidade = match.group(1).strip()
+    if not setor:
+        match = re.search(r'SETOR:\s*([^\n]+)', page_text, re.IGNORECASE)
+        if match: setor = match.group(1).strip()
+    return unidade, setor
+
 def clean_cell_value(value):
+    """Limpa e normaliza o valor de uma célula."""
     if not value: return ""
     return ' '.join(str(value).replace('\n', ' ').split())
 
 def is_header_row(row):
+    """Identifica se uma linha é um cabeçalho de tabela."""
     if not row or len(row) < 3: return False
     row_text = ' '.join([str(cell) for cell in row if cell]).upper()
     header_indicators = ['NOME', 'CARGO', 'MATRÍCULA', 'VÍNCULO', 'CONSELHO', 'HORÁRIO', 'C.H']
     indicator_count = sum(1 for indicator in header_indicators if indicator in row_text)
     day_count = sum(1 for cell in row if str(cell).strip().isdigit() and 1 <= int(str(cell).strip()) <= 31)
+    # Aumentando a exigência para evitar falsos positivos
     return indicator_count >= 3 or day_count >= 15
 
-def is_valid_professional_name(name):
-    if not name or not isinstance(name, str) or len(name.strip()) < 4: return False
-    name_clean = name.upper().strip()
-    invalid_keywords = [
-        'NOME COMPLETO', 'CARGO', 'MATRÍCULA', 'HORÁRIO', 'LEGENDA', 'ASSINATURA', 
-        'UNIDADE', 'SETOR', 'MÊS', 'ANO', 'ALTERAÇÃO', 'GOVERNO', 'SECRETARIA',
-        'ESCALA', 'PLANTÃO'
-    ]
-    if any(keyword in name_clean for keyword in invalid_keywords): return False
-    if name_clean.replace('.', '').replace('-', '').isdigit(): return False
-    return len(name_clean.split()) >= 2
-
 def build_header_map(row):
+    """Constrói um mapeamento de coluna (cabeçalho) a partir de uma linha."""
     header_map, nome_idx = {}, None
     start_col = 1 if row and row[0] and (str(row[0]).isdigit() or str(row[0]).strip() in ['#', 'Nº']) else 0
     for i, cell in enumerate(row[start_col:], start=start_col):
@@ -148,6 +193,19 @@ def build_header_map(row):
                 if 1 <= day <= 31: header_map[day] = i
             except (ValueError, TypeError): pass
     return header_map, nome_idx
+
+def is_valid_professional_name(name):
+    """Verifica se uma string parece ser um nome de profissional válido."""
+    if not name or not isinstance(name, str) or len(name.strip()) < 4: return False
+    name_clean = name.upper().strip()
+    invalid_keywords = [
+        'NOME COMPLETO', 'CARGO', 'MATRÍCULA', 'HORÁRIO', 'LEGENDA', 'ASSINATURA', 
+        'UNIDADE', 'SETOR', 'MÊS', 'ANO', 'ALTERAÇÃO', 'GOVERNO', 'SECRETARIA',
+        'ESCALA', 'PLANTÃO'
+    ]
+    if any(keyword in name_clean for keyword in invalid_keywords): return False
+    if name_clean.replace('.', '').replace('-', '').isdigit(): return False
+    return len(name_clean.split()) >= 2
 
 # --- BASE DE PADRÕES ---
 
@@ -219,6 +277,7 @@ PATTERN_DATABASE = [
 ]
 
 def find_best_pattern(page_text, header_row):
+    """Encontra o melhor padrão correspondente para a página e cabeçalho fornecidos."""
     for pattern in PATTERN_DATABASE:
         if pattern["detector"](page_text, header_row):
             return pattern
@@ -228,6 +287,7 @@ def find_best_pattern(page_text, header_row):
 
 @app.post("/normaliza-escala-from-pdf")
 async def normaliza_escala_from_pdf(request: Request):
+    """Recebe um ou mais PDFs em Base64, extrai, normaliza e retorna os dados da escala de plantão."""
     try:
         body = await request.json()
         global_unidade, global_setor, global_mes, global_ano = None, None, None, None
@@ -240,6 +300,7 @@ async def normaliza_escala_from_pdf(request: Request):
             with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
                 page = doc[0]
                 page_text = page.get_text("text")
+                # Usa as funções globais para extrair informações da página
                 unidade, setor = extract_unidade_setor_from_text(page_text)
                 mes, ano = parse_mes_ano(page_text)
                 if unidade: global_unidade = unidade
@@ -271,7 +332,6 @@ async def normaliza_escala_from_pdf(request: Request):
                     if detected_pattern:
                         header_map, nome_idx = build_header_map(row)
                         current_context = {"pattern": detected_pattern, "header_map": header_map, "nome_idx": nome_idx}
-                    # Se não detectar, mantém o contexto anterior (página de continuação com cabeçalho repetido)
                 
                 if not current_context["pattern"]:
                     i += 1
@@ -305,134 +365,8 @@ async def normaliza_escala_from_pdf(request: Request):
         return JSONResponse(content=result)
         
     except Exception as e:
-        # Funções de baixo nível para extrair mês/ano e unidade/setor
-        def parse_mes_ano(text):
-            patterns = [r'MÊS[\s/:]*([A-ZÇÃ]+)[\s/]*(\d{4})', r'MES/ANO:\s*([A-ZÇÃ]+)\s*/\s*(\d{4})', r'([A-ZÇÃ]+)/(\d{4})', r'MÊS:\s*([A-ZÇÃ]+)', r'([A-ZÇÃ]+)\s+(\d{4})']
-            text_upper = text.upper()
-            mes, ano = None, None
-            for pattern in patterns:
-                match = re.search(pattern, text_upper)
-                if match:
-                    groups = match.groups()
-                    mes_val = MONTH_MAP.get(groups[0].strip())
-                    if mes_val: mes = mes_val
-                    if len(groups) > 1 and groups[1]:
-                        try: ano = int(groups[1])
-                        except (ValueError, TypeError): pass
-                    if mes and ano: return mes, ano
-            if not ano:
-                year_match = re.search(r'\b(20\d{2})\b', text)
-                if year_match: ano = int(year_match.group(1))
-            return mes, ano
-
-        def extract_unidade_setor_from_text(page_text):
-            unidade, setor = None, None
-            unidade_patterns = [r'UNIDADE:\s*([^/\n]+?)(?:\s*UNIDADE\s*SETOR:|/|$)', r'UNIDADE CENTRAL\s*([^/\n]+?)(?:\s*UNIDADE\s*SETOR:|/|$)']
-            setor_patterns = [r'UNIDADE\s*/\s*SETOR:\s*([^/\n]+?)(?:/|$)', r'UNIDADE\s*SETOR:\s*([^/\n]+?)(?:/|RESPONSÁVEL TÉCNICO|$)', r'SETOR:\s*CE[T|P][^/\n]+']
-            for pattern in unidade_patterns:
-                match = re.search(pattern, page_text, re.IGNORECASE)
-                if match:
-                    unidade = match.group(1).strip().replace('SETOR:', '').strip()
-                    break
-            for pattern in setor_patterns:
-                match = re.search(pattern, page_text, re.IGNORECASE)
-                if match:
-                    setor = match.group(1).strip().replace('RESPONSÁVEL TÉCNICO', '').strip(' /')
-                    break
-            if not unidade:
-                match = re.search(r'UNIDADE:\s*([^\n]+)', page_text, re.IGNORECASE)
-                if match: unidade = match.group(1).strip()
-            if not setor:
-                match = re.search(r'SETOR:\s*([^\n]+)', page_text, re.IGNORECASE)
-                if match: setor = match.group(1).strip()
-            return unidade, setor
+        # Bloco 'except' corrigido: apenas lida com o erro, não redefine funções.
         return JSONResponse(content={"error": str(e), "trace": traceback.format_exc()}, status_code=500)
-# --- FIM normaliza-escala-from-pdf ---
-
-@app.post("/text-to-pdf")
-async def text_to_pdf(request: Request):
-    try:
-        data = await request.json()
-        raw_text = data.get("text", "")
-        filename = data.get("filename", "saida.pdf")
-
-        if not os.path.exists(FONT_PATH):
-            raise RuntimeError(f"Fonte não encontrada em: {FONT_PATH}")
-
-        # Pré-processamento: substitui múltiplos \n e quebras "duplas"
-        clean_text = raw_text.replace("\r", "").replace("\n", " ")
-        clean_text = " ".join(clean_text.split())  # remove múltiplos espaços
-        lines = [clean_text[i:i+120] for i in range(0, len(clean_text), 120)]
-
-        pdf = FPDF()
-        pdf.add_page()
-        pdf.set_auto_page_break(auto=True, margin=15)
-        pdf.add_font("DejaVu", "", FONT_PATH, uni=True)
-        pdf.set_font("DejaVu", size=10)
-
-        for line in lines:
-            pdf.multi_cell(w=190, h=8, txt=line)
-
-        # CORREÇÃO: Tratamento adequado do output do FPDF
-        pdf_output = pdf.output(dest='S')
-        
-        # Converte para bytes se necessário
-        if isinstance(pdf_output, str):
-            pdf_bytes = pdf_output.encode('latin1')
-        elif isinstance(pdf_output, bytearray):
-            pdf_bytes = bytes(pdf_output)
-        else:
-            pdf_bytes = pdf_output
-        
-        base64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
-
-        return JSONResponse(content={"file_base64": base64_pdf, "filename": filename})
-
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
-# --- FIM normaliza-escala-from-pdf ---
-
-@app.post("/text-to-pdf")
-async def text_to_pdf(request: Request):
-    try:
-        data = await request.json()
-        raw_text = data.get("text", "")
-        filename = data.get("filename", "saida.pdf")
-
-        if not os.path.exists(FONT_PATH):
-            raise RuntimeError(f"Fonte não encontrada em: {FONT_PATH}")
-
-        # Pré-processamento: substitui múltiplos \n e quebras "duplas"
-        clean_text = raw_text.replace("\r", "").replace("\n", " ")
-        clean_text = " ".join(clean_text.split())  # remove múltiplos espaços
-        lines = [clean_text[i:i+120] for i in range(0, len(clean_text), 120)]
-
-        pdf = FPDF()
-        pdf.add_page()
-        pdf.set_auto_page_break(auto=True, margin=15)
-        pdf.add_font("DejaVu", "", FONT_PATH, uni=True)
-        pdf.set_font("DejaVu", size=10)
-
-        for line in lines:
-            pdf.multi_cell(w=190, h=8, txt=line)
-
-        # CORREÇÃO: Tratamento adequado do output do FPDF
-        pdf_output = pdf.output(dest='S')
-        
-        # Converte para bytes se necessário
-        if isinstance(pdf_output, str):
-            pdf_bytes = pdf_output.encode('latin1')
-        elif isinstance(pdf_output, bytearray):
-            pdf_bytes = bytes(pdf_output)
-        else:
-            pdf_bytes = pdf_output
-        
-        base64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
-
-        return JSONResponse(content={"file_base64": base64_pdf, "filename": filename})
-
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
 
 # --- FIM normaliza-escala-from-pdf ---
 
