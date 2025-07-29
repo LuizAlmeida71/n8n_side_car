@@ -91,15 +91,6 @@ async def split_pdf(file: UploadFile = File(...)):
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 # --- INÍCIO normaliza-escala-from-pdf ---
-import re
-import base64
-import fitz
-from datetime import datetime, timedelta
-from collections import defaultdict
-from fastapi import Request
-from fastapi.responses import JSONResponse
-import traceback
-
 # --- CONSTANTES ---
 
 MONTH_MAP = {
@@ -174,7 +165,8 @@ def is_header_row(row):
     header_indicators = ['NOME', 'CARGO', 'MATRÍCULA', 'VÍNCULO', 'CONSELHO', 'HORÁRIO', 'C.H']
     indicator_count = sum(1 for indicator in header_indicators if indicator in row_text)
     day_count = sum(1 for cell in row if str(cell).strip().isdigit() and 1 <= int(str(cell).strip()) <= 31)
-    return indicator_count >= 2 or day_count >= 10
+    # CORREÇÃO 1: Menos restritivo - 1 indicador OU 5+ dias
+    return indicator_count >= 1 or day_count >= 5
 
 def build_header_map(row):
     header_map, nome_idx = {}, None
@@ -197,16 +189,22 @@ def build_header_map(row):
     return header_map, nome_idx
 
 def is_valid_professional_name(name):
-    if not name or not isinstance(name, str) or len(name.strip()) < 4: return False
+    if not name or not isinstance(name, str) or len(name.strip()) < 3: return False  # 3 em vez de 4
     name_clean = name.upper().strip()
-    # Filtro mais rigoroso para evitar extrair lixo como nome
+    # CORREÇÃO 2: Filtros mais específicos, menos genéricos
     invalid_keywords = [
         'NOME COMPLETO', 'CARGO', 'MATRÍCULA', 'HORÁRIO', 'LEGENDA', 'ASSINATURA', 
-        'UNIDADE', 'SETOR', 'MÊS', 'ANO', 'ALTERAÇÃO', 'GOVERNO', 'SECRETARIA'
+        'UNIDADE', 'SETOR', 'MÊS', 'ANO', 'ALTERAÇÃO', 'GOVERNO', 'SECRETARIA',
+        'ESCALA DE PLANTÃO', 'DOCUMENTO'  # Específicos que aparecem nos PDFs
     ]
     if any(keyword in name_clean for keyword in invalid_keywords): return False
-    if name_clean.replace('.', '').replace('-', '').isdigit(): return False
-    return len(name_clean.split()) >= 2
+    if name_clean.replace('.', '').replace('-', '').replace(' ', '').isdigit(): return False
+    
+    # CORREÇÃO 3: Aceitar nomes com 1 palavra SE for > 4 caracteres (ex: NORINA)
+    palavras = name_clean.split()
+    if len(palavras) == 1 and len(name_clean) > 4:
+        return True
+    return len(palavras) >= 2
 
 def clean_cell_value(value):
     if not value: return ""
@@ -311,7 +309,12 @@ async def normaliza_escala_from_pdf(request: Request):
             i = 0
             while i < len(all_rows):
                 row = all_rows[i]
-                if is_header_row(row):
+                # CORREÇÃO 4: Verificar se primeira linha é profissional antes de assumir cabeçalho
+                nome_primeira_celula = clean_cell_value(row[0]) if row else ""
+                if is_valid_professional_name(nome_primeira_celula):
+                    # Se primeira célula é nome válido, não é cabeçalho
+                    pass
+                elif is_header_row(row):
                     current_header_map, current_nome_idx = build_header_map(row)
                     i += 1
                     continue
