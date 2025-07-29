@@ -121,7 +121,7 @@ def interpretar_turno(token):
 def is_valid_professional_name(name):
     if not name or not isinstance(name, str): return False
     name_upper = name.strip().upper()
-    ignored = ["NOME COMPLETO", "LEGENDA", "ASSINATURA", "ASSINADO", "COMPLETO", "CARGO", "MATRÍCULA", "UNIDADE", "SETOR", "MÊS"]
+    ignored = ["NOME COMPLETO", "LEGENDA", "ASSINATURA", "ASSINADO", "COMPLETO", "CARGO", "MATRÍCULA", "UNIDADE", "SETOR", "MÊS", "ESCALA", "ÚLTIMA"]
     if any(keyword in name_upper for keyword in ignored): return False
     return len(name.strip().split()) >= 2
 
@@ -156,15 +156,16 @@ async def normaliza_escala_from_pdf(request: Request):
                     tabela = tabelas[0]
                     all_table_rows.extend(tabela)
 
-        header_row = next((row for row in all_table_rows if "NOME COMPLETO" in ''.join([str(cell or '') for cell in row]).upper()), None)
-        if not header_row:
+        header_row_idx = next((i for i, row in enumerate(all_table_rows) if row and "NOME COMPLETO" in ''.join([str(cell or '') for cell in row]).upper()), None)
+        if header_row_idx is None:
             return JSONResponse({"error": "Cabeçalho não encontrado."}, status_code=400)
 
-        header_map = {idx: col for idx, col in enumerate(header_row) if str(col).strip().isdigit()}
-        nome_idx = header_row.index(next(col for col in header_row if "NOME COMPLETO" in col.upper()))
+        dias_row = all_table_rows[header_row_idx + 1]
+        header_map = {idx: col for idx, col in enumerate(dias_row) if str(col).strip().isdigit()}
+        nome_idx = next(idx for idx, col in enumerate(all_table_rows[header_row_idx]) if "NOME COMPLETO" in str(col).upper())
 
         profissionais_data = defaultdict(lambda: defaultdict(list))
-        for row in all_table_rows[all_table_rows.index(header_row)+1:]:
+        for row in all_table_rows[header_row_idx+2:]:
             nome_bruto = row[nome_idx]
             if not is_valid_professional_name(nome_bruto): continue
             nome = ' '.join(nome_bruto.split())
@@ -199,6 +200,7 @@ async def normaliza_escala_from_pdf(request: Request):
 
     except Exception as e:
         return JSONResponse({"error": str(e), "trace": traceback.format_exc()}, status_code=500)
+
 
 # --- FIM normaliza-escala-from-pdf ---
 
