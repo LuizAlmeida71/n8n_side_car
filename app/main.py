@@ -132,7 +132,57 @@ class ContextoEscala:
     def eh_valido(self):
         return self.header_map is not None and self.nome_idx is not None
 
-# --- FUNÇÕES AUXILIARES MELHORADAS ---
+# --- FUNÇÕES AUXILIARES ---
+
+def extract_unidade_setor_from_text(page_text):
+    """Extrai unidade e setor do texto da página"""
+    unidade, setor = None, None
+    
+    # Padrões para unidade
+    unidade_patterns = [
+        r'UNIDADE:\s*([^/\n]+?)(?:\s*UNIDADE\s*SETOR:|/|$)',
+        r'UNIDADE CENTRAL\s*([^/\n]+?)(?:\s*UNIDADE\s*SETOR:|/|$)',
+        r'UNIDADE:\s*([^\n]+?)(?:\n|$)'
+    ]
+    
+    # Padrões para setor
+    setor_patterns = [
+        r'UNIDADE\s*/\s*SETOR:\s*([^/\n]+?)(?:/|$)',
+        r'UNIDADE\s*SETOR:\s*([^/\n]+?)(?:/|RESPONSÁVEL TÉCNICO|$)',
+        r'UNIDADE/SETOR:\s*([^/\n]+?)(?:/|$)',
+        r'SETOR:\s*([^/\n]+?)(?:/|$)'
+    ]
+    
+    # Busca unidade
+    for pattern in unidade_patterns:
+        match = re.search(pattern, page_text, re.IGNORECASE)
+        if match:
+            unidade = match.group(1).strip()
+            # Remove "SETOR:" se ficou junto
+            unidade = unidade.replace('SETOR:', '').strip()
+            break
+    
+    # Busca setor
+    for pattern in setor_patterns:
+        match = re.search(pattern, page_text, re.IGNORECASE)
+        if match:
+            setor = match.group(1).strip()
+            # Remove "RESPONSÁVEL TÉCNICO" se ficou junto
+            setor = setor.replace('RESPONSÁVEL TÉCNICO', '').strip(' /')
+            break
+    
+    # Fallback mais genérico se não encontrou
+    if not unidade:
+        match = re.search(r'UNIDADE:\s*([^\n]+)', page_text, re.IGNORECASE)
+        if match:
+            unidade = match.group(1).strip()
+    
+    if not setor:
+        match = re.search(r'SETOR:\s*([^\n]+)', page_text, re.IGNORECASE)
+        if match:
+            setor = match.group(1).strip()
+    
+    return unidade, setor
 
 def detectar_tipo_escala(page_text: str) -> str:
     """Detecta o tipo de escala baseado em palavras-chave"""
@@ -150,7 +200,7 @@ def detectar_tipo_escala(page_text: str) -> str:
         return "TIPO_E"  # Continuação
 
 def parse_mes_ano(text):
-    """Função mais robusta para extrair mês e ano"""
+    """Função para extrair mês e ano"""
     patterns = [
         r'MÊS/ANO:\s*([A-ZÇÃ]+)\s*/\s*(\d{4})',
         r'MÊS[\s/:]*([A-ZÇÃ]+)[\s/]*(\d{4})',
@@ -263,7 +313,7 @@ def build_header_map_improved(row, tipo_escala: str) -> Tuple[Dict, Optional[int
                 # Pode ser dia da semana
                 if cell_text in ['S', 'D', 'Q', 'T', 'SEG', 'TER', 'QUA', 'QUI', 'SEX', 'SAB', 'DOM']:
                     pass  # Ignora dias da semana
-    
+
     return header_map, nome_idx, tem_coluna_numerica
 
 def is_valid_professional_name_improved(name: str) -> bool:
@@ -306,38 +356,6 @@ def is_valid_professional_name_improved(name: str) -> bool:
     # Para múltiplas palavras, pelo menos 2
     return len(palavras) >= 2
 
-def extract_professional_from_row(row: List, header_map: Dict, nome_idx: int, 
-                                tem_coluna_numerica: bool) -> Optional[Dict]:
-    """Extrai informações do profissional de uma linha"""
-    if not row or nome_idx >= len(row):
-        return None
-    
-    # Ajusta índice se tem coluna numérica
-    actual_nome_idx = nome_idx
-    if tem_coluna_numerica and row[0] and str(row[0]).strip().isdigit():
-        # Se a primeira coluna é número, todos os índices já estão corretos
-        pass
-    
-    nome = clean_cell_value(row[actual_nome_idx])
-    if not is_valid_professional_name_improved(nome):
-        return None
-    
-    # Extrai outras informações
-    info = {}
-    for key, idx in header_map.items():
-        if isinstance(key, str) and idx < len(row):
-            info[key] = clean_cell_value(row[idx])
-    
-    return {
-        "nome": nome,
-        "cargo": info.get("CARGO", "N/I"),
-        "crm": info.get("CRM", "N/I"),
-        "vinculo": info.get("VÍNCULO", "N/I"),
-        "matricula": info.get("MATRÍCULA", "N/I"),
-        "horario": info.get("HORÁRIO", "N/I"),
-        "ch": info.get("CH", "N/I")
-    }
-
 def clean_cell_value(value):
     """Limpa valor da célula"""
     if not value:
@@ -377,6 +395,38 @@ def interpretar_turno(token):
             seen.add(t['turno'])
     
     return unique_turnos
+
+def extract_professional_from_row(row: List, header_map: Dict, nome_idx: int, 
+                                tem_coluna_numerica: bool) -> Optional[Dict]:
+    """Extrai informações do profissional de uma linha"""
+    if not row or nome_idx >= len(row):
+        return None
+    
+    # Ajusta índice se tem coluna numérica
+    actual_nome_idx = nome_idx
+    if tem_coluna_numerica and row[0] and str(row[0]).strip().isdigit():
+        # Se a primeira coluna é número, todos os índices já estão corretos
+        pass
+    
+    nome = clean_cell_value(row[actual_nome_idx])
+    if not is_valid_professional_name_improved(nome):
+        return None
+    
+    # Extrai outras informações
+    info = {}
+    for key, idx in header_map.items():
+        if isinstance(key, str) and idx < len(row):
+            info[key] = clean_cell_value(row[idx])
+    
+    return {
+        "nome": nome,
+        "cargo": info.get("CARGO", "N/I"),
+        "crm": info.get("CRM", "N/I"),
+        "vinculo": info.get("VÍNCULO", "N/I"),
+        "matricula": info.get("MATRÍCULA", "N/I"),
+        "horario": info.get("HORÁRIO", "N/I"),
+        "ch": info.get("CH", "N/I")
+    }
 
 def process_all_pages_improved(pages_data: List[Dict], contexto: ContextoEscala) -> Tuple[Dict, Dict]:
     """Processa todas as páginas com contexto compartilhado"""
