@@ -91,275 +91,104 @@ async def split_pdf(file: UploadFile = File(...)):
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 # --- INÍCIO normaliza-escala-from-pdf ---
+MONTH_MAP = {m: i+1 for i, m in enumerate(['JANEIRO', 'FEVEREIRO', 'MARÇO', 'ABRIL', 'MAIO', 'JUNHO', 'JULHO', 'AGOSTO', 'SETEMBRO', 'OUTUBRO', 'NOVEMBRO', 'DEZEMBRO'])}
 
-MONTH_MAP = {
-    'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
-    'JUNHO': 6, 'JULHO': 7, 'AGOSTO': 8, 'SETEMBRO': 9, 'OUTUBRO': 10,
-    'NOVEMBRO': 11, 'DEZEMBRO': 12
+HEADER_PATTERNS = {
+    "padrao_1": ["NOME COMPLETO", "CARGO", "MATRÍCULA", "VÍNCULO", "CH", "HORÁRIO", "CONSELHO DE CLASSE"]
 }
 
 def parse_mes_ano(text):
     match = re.search(r'MÊS[\s/:]*([A-ZÇÃ]+)[\s/]*(\d{4})', text.upper())
     if not match: return None, None
     mes_nome, ano_str = match.groups()
-    mes = MONTH_MAP.get(mes_nome)
-    ano = int(ano_str)
-    return mes, ano
+    return MONTH_MAP.get(mes_nome), int(ano_str)
 
-TURNOS = {
-    "MANHÃ": {"inicio": "07:00", "fim": "13:00"},
-    "TARDE": {"inicio": "13:00", "fim": "19:00"},
-    "NOITE (início)": {"inicio": "19:00", "fim": "01:00"},
-    "NOITE (fim)": {"inicio": "01:00", "fim": "07:00"},
-}
+def interpretar_turno(token):
+    mapa = {
+        "M": [("07:00", "13:00")],
+        "T": [("13:00", "19:00")],
+        "N": [("19:00", "01:00"), ("01:00", "07:00")],
+        "D": [("07:00", "13:00"), ("13:00", "19:00")]
+    }
+    token = token.replace('/', '').upper()
+    turnos = []
+    for char in token:
+        if char in mapa:
+            for inicio, fim in mapa[char]:
+                turnos.append({"turno": char, "inicio": inicio, "fim": fim})
+    return turnos
 
-HEADER_PATTERNS = {
-    "tipo_a": [
-        "NOME COMPLETO", "CARGO", "MATRÍCULA", "VÍNCULO", "CH", "HORÁRIO",
-        "CONSELHO DE CLASSE"
-    ],
-}
+def normalizar_tabela(tabela):
+    max_cols = max(len(row) for row in tabela)
+    return [row + [""]*(max_cols - len(row)) for row in tabela]
 
 def header_similarity(header_row, pattern):
-    header_norm = [str(cell).replace('\n', ' ').strip().upper() for cell in header_row]
-    matches = sum(1 for a, b in zip(header_norm, pattern) if a == b)
-    return matches / max(len(pattern), len(header_norm))
+    matches = sum(a.strip().upper() == b for a, b in zip(header_row, pattern))
+    return matches / max(len(pattern), len(header_row))
 
 def find_pattern(header_row):
-    best_pattern = None
-    best_score = 0
+    best_pattern, best_score = None, 0
     for name, pattern in HEADER_PATTERNS.items():
         score = header_similarity(header_row, pattern)
         if score > best_score:
-            best_score = score
-            best_pattern = name
+            best_score, best_pattern = score, name
     return best_pattern if best_score > 0.6 else None
 
-def is_valid_professional_name(name):
-    if not name or not isinstance(name, str): return False
-    name_upper = name.strip().upper()
-    ignored = ["NOME COMPLETO", "LEGENDA", "ASSINATURA", "ASSINADO", "COMPLETO", "CARGO", "MATRÍCULA"]
-    if any(keyword in name_upper for keyword in ignored): return False
-    return len(name.split()) >= 2 or name.isupper()
-
-def interpretar_turno(token):
-    token_clean = token.replace('\n', '').replace('/', '').replace(' ', '').upper()
-    turnos = []
-    for c in token_clean:
-        if c == "M":
-            turnos.append({"turno": "MANHÃ", **TURNOS["MANHÃ"]})
-        elif c == "T":
-            turnos.append({"turno": "TARDE", **TURNOS["TARDE"]})
-        elif c == "N":
-            turnos.append({"turno": "NOITE (início)", **TURNOS["NOITE (início)"]})
-            turnos.append({"turno": "NOITE (fim)", **TURNOS["NOITE (fim)"]})
-        elif c == "D":
-            turnos.append({"turno": "MANHÃ", **TURNOS["MANHÃ"]})
-            turnos.append({"turno": "TARDE", **TURNOS["TARDE"]})
-    return turnos
-
-def dedup_plantao(lista):
-    seen = set()
-    result = []
-    for p in lista:
-        key = (p["dia"], p["turno"], p["inicio"], p["fim"])
-        if key not in seen:
-            seen.add(key)
-            result.append(p)
-    return result
-
-def processar_tipo_a(all_table_rows, header_map, nome_idx, last_ano, last_mes, last_setor):
-    profissionais_data = defaultdict(lambda: {"info_rows": []})
-    idx_linha = 0
-    last_name = None
-
-    while idx_linha < len(all_table_rows):
-        row = all_table_rows[idx_linha]
-        if row and any("NOME" in str(cell).upper() and "COMPLETO" in str(cell).upper() for cell in row):
-            idx_linha += 1
-            continue
-
-        if not header_map or nome_idx is None:
-            idx_linha += 1
-            continue
-
-        if row and (row[0] is None or (isinstance(row[0], str) and row[0].strip().isdigit())):
-            row = row[1:]
-        if not row or len(row) <= nome_idx:
-            idx_linha += 1
-            continue
-
-        nome_bruto = row[nome_idx]
-        if nome_bruto and is_valid_professional_name(nome_bruto):
-            last_name = nome_bruto.replace('\n', ' ').strip()
-        elif nome_bruto and last_name is not None and len(nome_bruto.strip().split()) == 1:
-            last_name = f"{last_name} {nome_bruto.strip()}"
-        if last_name is not None:
-            new_row = list(row)
-            new_row[nome_idx] = last_name
-            profissionais_data[last_name]["info_rows"].append(new_row)
-        idx_linha += 1
-
-    lista_profissionais_final = []
-    for nome, data in profissionais_data.items():
-        info_rows = data["info_rows"]
-        primeira_linha = info_rows[0]
-        profissional_obj = {
-            "medico_nome": nome,
-            "medico_crm": str(primeira_linha[header_map.get("CRM")]).strip() if header_map.get("CRM") and header_map.get("CRM") < len(primeira_linha) and primeira_linha[header_map.get("CRM")] else "N/I",
-            "medico_especialidade": str(primeira_linha[header_map.get("CARGO")]).strip() if header_map.get("CARGO") and header_map.get("CARGO") < len(primeira_linha) else "N/I",
-            "medico_vinculo": str(primeira_linha[header_map.get("VÍNCULO")]).strip() if header_map.get("VÍNCULO") and header_map.get("VÍNCULO") < len(primeira_linha) else "N/I",
-            "medico_setor": last_setor or "NÃO INFORMADO",
-            "plantoes": []
-        }
-        plantoes_brutos = defaultdict(list)
-        for row in info_rows:
-            for dia, col_idx in header_map.items():
-                if isinstance(dia, int):
-                    if col_idx < len(row) and row[col_idx] and str(row[col_idx]).strip():
-                        plantoes_brutos[dia].append(str(row[col_idx]).strip())
-
-        for dia, tokens in sorted(plantoes_brutos.items()):
-            for token in tokens:
-                turnos = interpretar_turno(token)
-                data_plantao = datetime(last_ano, last_mes, dia)
-                for turno_info in turnos:
-                    if turno_info["turno"] == "NOITE (fim)":
-                        data_fim = data_plantao + timedelta(days=1)
-                        profissional_obj["plantoes"].append({
-                            "dia": data_fim.day,
-                            "data": data_fim.strftime('%d/%m/%Y'),
-                            "turno": turno_info["turno"],
-                            "inicio": turno_info["inicio"],
-                            "fim": turno_info["fim"]
-                        })
-                    else:
-                        profissional_obj["plantoes"].append({
-                            "dia": data_plantao.day,
-                            "data": data_plantao.strftime('%d/%m/%Y'),
-                            "turno": turno_info["turno"],
-                            "inicio": turno_info["inicio"],
-                            "fim": turno_info["fim"]
-                        })
-        profissional_obj["plantoes"] = dedup_plantao(profissional_obj["plantoes"])
-        profissional_obj["plantoes"].sort(key=lambda p: (p["dia"], p["inicio"] or ""))
-        if profissional_obj["plantoes"]:
-            lista_profissionais_final.append(profissional_obj)
-    return lista_profissionais_final
+def extrair_metadados_pagina(page_text):
+    unidade = re.search(r'UNIDADE[:\s-]*(.+?)(UNIDADE|SETOR|MÊS|ESCALA|$)', page_text.replace('\n', ' '), re.I)
+    setor = re.search(r'UNIDADE[/\s-]*SETOR[:\s-]*(.+?)(MÊS|ESCALA|$)', page_text.replace('\n', ' '), re.I)
+    return unidade.group(1).strip() if unidade else None, setor.group(1).strip() if setor else None
 
 @app.post("/normaliza-escala-from-pdf")
 async def normaliza_escala_from_pdf(request: Request):
     try:
         body = await request.json()
-        if isinstance(body, dict) and "pages" in body:
-            pages = body["pages"]
-        elif isinstance(body, list):
-            pages = body
-        else:
-            return JSONResponse(content={
-                "error": "Formato de entrada inválido: esperado uma lista ou um dict com a chave 'pages'."
-            }, status_code=400)
+        pages = body["pages"] if isinstance(body, dict) else body
+        last_pattern_name = last_header_row = last_unidade = last_setor = None
+        last_mes = last_ano = None
+        all_rows = []
 
-        all_table_rows = []
-        last_pattern_name = None
-        last_header_row = None
-        last_header_map = None
-        last_setor = None
-        last_unidade = None
-        last_mes, last_ano = None, None
-
-        for page_idx, page_data in enumerate(pages):
-            b64_data = (
-                page_data.get("file_base64")
-                or page_data.get("bae64")
-                or page_data.get("base64")
-            )
-            if not b64_data:
-                return JSONResponse(content={
-                    "error": f"Página {page_idx+1} sem campo base64 ('file_base64', 'bae64' ou 'base64')."
-                }, status_code=400)
+        for page_data in pages:
+            b64_data = page_data.get("file_base64") or page_data.get("bae64") or page_data.get("base64")
             pdf_bytes = base64.b64decode(b64_data)
+
             with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
-                page = doc[0]
-                page_text = page.get_text("text")
-                setor_match = re.search(r'UNIDADE\s*SETOR[:\s\-]*([^\n\r]+)', page_text, re.IGNORECASE)
-                setor = setor_match.group(1).strip() if setor_match else last_setor
-                unidade_match = re.search(r'UNIDADE[:\s\-]*([^\n\r]+)', page_text, re.IGNORECASE)
-                unidade = unidade_match.group(1).strip() if unidade_match else last_unidade
-                mes, ano = parse_mes_ano(page_text)
-                if mes is None: mes = last_mes
-                if ano is None: ano = last_ano
+                page_text = doc[0].get_text("text")
+                unidade, setor = extrair_metadados_pagina(page_text)
                 if unidade: last_unidade = unidade
                 if setor: last_setor = setor
+                mes, ano = parse_mes_ano(page_text)
                 if mes: last_mes = mes
                 if ano: last_ano = ano
 
-                tabelas = []
-                for table in page.find_tables():
-                    extracted = table.extract()
-                    if extracted: tabelas.append(extracted)
-                tabela = tabelas[0] if tabelas else []
+                tabelas = [t.extract() for t in doc[0].find_tables() if t.extract()]
+                if not tabelas: continue
+                tabela = normalizar_tabela(tabelas[0])
 
-                # Detecção de cabeçalho
-                header_row = None
-                for row in tabela:
-                    if row and any("NOME" in str(cell).upper() and "COMPLETO" in str(cell).upper() for cell in row):
-                        if row[0] is None or (isinstance(row[0], str) and row[0].strip().isdigit()):
-                            header_row = row[1:]
-                        else:
-                            header_row = row
-                        header_row = [str(cell).replace('\n', ' ').strip().upper() if cell else "" for cell in header_row]
-                        break
-
-                # Fluxo do algoritmo do desenho
+                header_row = next((row for row in tabela if "NOME COMPLETO" in ''.join(row).upper()), None)
                 if header_row:
-                    if last_header_row is not None and header_row == last_header_row:
-                        pattern_name = last_pattern_name
-                    else:
-                        pattern_name = find_pattern(header_row)
-                        if not pattern_name:
-                            HEADER_PATTERNS[f"novo_padrao_{len(HEADER_PATTERNS)+1}"] = header_row
-                            pattern_name = f"novo_padrao_{len(HEADER_PATTERNS)}"
-                    last_pattern_name = pattern_name
-                    last_header_row = header_row
-                    header_map = {}
-                    for i, col_name in enumerate(header_row):
-                        if "NOME COMPLETO" in col_name: header_map["NOME COMPLETO"] = i
-                        elif "CARGO" in col_name: header_map["CARGO"] = i
-                        elif "VÍNCULO" in col_name or "VINCULO" in col_name: header_map["VÍNCULO"] = i
-                        elif "CONSELHO" in col_name or "CRM" in col_name: header_map["CRM"] = i
-                        elif col_name.isdigit(): header_map[int(col_name)] = i
-                    last_header_map = header_map
-                    nome_idx = header_map.get("NOME COMPLETO")
-                    all_table_rows.append(header_row)
-                    all_table_rows.extend(tabela[tabela.index(row)+1:])
+                    pattern_name = find_pattern(header_row) or f"novo_{len(HEADER_PATTERNS)+1}"
+                    if pattern_name.startswith("novo"):
+                        HEADER_PATTERNS[pattern_name] = header_row
+                    last_pattern_name, last_header_row = pattern_name, header_row
+                    idx = tabela.index(header_row)
+                    all_rows += tabela[idx+1:]
                 else:
-                    pattern_name = last_pattern_name
-                    header_row = last_header_row
-                    header_map = last_header_map
-                    nome_idx = header_map.get("NOME COMPLETO") if header_map else None
-                    if header_row:
-                        all_table_rows.append(header_row)
-                        all_table_rows.extend(tabela)
+                    all_rows += tabela
 
-        if not last_pattern_name:
-            return JSONResponse(content={"error": "Nenhum padrão de cabeçalho detectado em nenhuma página."}, status_code=400)
-        elif last_pattern_name.startswith("tipo_a"):
-            profissionais = processar_tipo_a(all_table_rows, last_header_map, last_header_map.get("NOME COMPLETO"), last_ano, last_mes, last_setor)
-        else:
-            return JSONResponse(content={"error": f"Padrão {last_pattern_name} não suportado ainda."}, status_code=400)
+        if not last_pattern_name: return JSONResponse({"error": "Padrão não detectado."}, 400)
 
-        mes_nome_str = list(MONTH_MAP.keys())[list(MONTH_MAP.values()).index(last_mes)]
-        final_output = [{
-            "unidade_escala": last_unidade or "NÃO INFORMADO",
-            "setor_escala": last_setor or "NÃO INFORMADO",
-            "mes_ano_escala": f"{mes_nome_str}/{last_ano}",
-            "profissionais": profissionais
-        }]
-        return JSONResponse(content=final_output)
+        profissionais = []
+        for row in all_rows:
+            nome = row[0].strip()
+            if nome:
+                profissionais.append({"medico_nome": nome, "setor": last_setor, "plantoes": sorted(interpretar_turno(''.join(row[1:])), key=lambda x: x["inicio"])})
+
+        mes_nome = [k for k,v in MONTH_MAP.items() if v == last_mes][0]
+        return JSONResponse([{ "unidade": last_unidade, "setor": last_setor, "mes_ano": f"{mes_nome}/{last_ano}", "profissionais": profissionais }])
 
     except Exception as e:
-        return JSONResponse(content={"error": str(e), "trace": traceback.format_exc()}, status_code=500)
+        return JSONResponse({"error": str(e), "trace": traceback.format_exc()}, 500)
 
 # --- FIM normaliza-escala-from-pdf ---
 
