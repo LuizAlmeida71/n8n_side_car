@@ -91,17 +91,6 @@ async def split_pdf(file: UploadFile = File(...)):
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 # --- INÍCIO normaliza-escala-from-pdf ---
-import re
-import base64
-import traceback
-from datetime import datetime, timedelta
-from collections import defaultdict
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-import fitz
-
-app = FastAPI()
-
 MONTH_MAP = {
     'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
     'JUNHO': 6, 'JULHO': 7, 'AGOSTO': 8, 'SETEMBRO': 9, 'OUTUBRO': 10,
@@ -157,115 +146,83 @@ def dedup_plantao(lista):
             result.append(p)
     return result
 
-def classificar_estrutura(tabela, texto):
-    """
-    Retorna o tipo da estrutura da página:
-      - tipo_1: Sem cabeçalho, só dados (continuação)
-      - tipo_2: Cabeçalho padrão, sem mesclagem
-      - tipo_3: Cabeçalho mesclado
-      - tipo_4: Metadados fora da tabela, grade simples
-    """
-    texto_limpo = texto.replace('\n', ' ')
-    num_header = 0
-    for row in tabela[:5]:  # só analisa as primeiras linhas
-        if any("NOME" in str(cell).upper() and "COMPLETO" in str(cell).upper() for cell in row):
-            num_header += 1
-    if num_header == 0 and tabela:  # Não tem cabeçalho, mas tem tabela
-        return "tipo_1"
-    elif num_header > 0:
-        # Detecta mesclagem: se há menos colunas no cabeçalho do que nas linhas de dados
-        col_counts = [len(row) for row in tabela if row]
-        if col_counts and len(tabela[0]) < max(col_counts):
-            return "tipo_3"
-        else:
-            return "tipo_2"
-    elif re.search(r'UNIDADE:.*UNIDADE/SETOR:.*MÊS', texto_limpo, re.IGNORECASE):
-        return "tipo_4"
-    return "tipo_2"  # default
-
-def extrair_metadados(texto, last_unidade, last_setor, last_mes, last_ano):
-    texto_reduzido = texto.replace('\n', ' ')
-    unidade_match = re.search(r'UNIDADE[:/\s-]*(.*?)(UNIDADE|SETOR|MÊS|ESCALA|$)', texto_reduzido, re.IGNORECASE)
-    setor_match = re.search(r'UNIDADE[\s/_\-]*SETOR[:/\s-]*(.*?)(MÊS|ESCALA|$)', texto_reduzido, re.IGNORECASE)
-    mes, ano = parse_mes_ano(texto)
-    unidade = unidade_match.group(1).strip() if unidade_match else last_unidade
-    setor = setor_match.group(1).strip() if setor_match else last_setor
-    if mes is None: mes = last_mes
-    if ano is None: ano = last_ano
-    return unidade, setor, mes, ano
-
-def normalizar_cabecalho(row):
-    # Junta cabeçalho mesclado e resolve deslocamento por índice
-    if row and (not row[0] or str(row[0]).strip().isdigit()):
-        # coluna de índice: começa em 1
-        row = row[1:]
-    return [str(cell).replace('\n', ' ').strip().upper() if cell else "" for cell in row]
-
-def montar_header_map(header_row):
-    header_map = {}
-    for i, col_name in enumerate(header_row):
-        if "NOME COMPLETO" in col_name: header_map["NOME COMPLETO"] = i
-        elif "CARGO" in col_name: header_map["CARGO"] = i
-        elif "VÍNCULO" in col_name or "VINCULO" in col_name: header_map["VÍNCULO"] = i
-        elif "CONSELHO" in col_name or "CRM" in col_name: header_map["CRM"] = i
-        elif col_name.isdigit(): header_map[int(col_name)] = i
-    return header_map
-
 @app.post("/normaliza-escala-from-pdf")
 async def normaliza_escala_from_pdf(request: Request):
     try:
         body = await request.json()
-        full_text, all_table_rows = "", []
+        # Corrigido: Consome body["pages"] e "file_base64"
+        all_table_rows = []
         last_header_row = None
         last_header_map = None
-        last_nome_idx = None
         last_setor = None
         last_unidade = None
         last_mes, last_ano = None, None
 
-        # Extração de dados e tabelas de todas as páginas
-        for page_idx, page_data in enumerate(body):
-            b64_data = page_data.get("bae64")
-            if not b64_data: continue
+        for page_idx, page_data in enumerate(body["pages"]):
+            b64_data = page_data.get("file_base64")
+            if not b64_data:
+                continue
             pdf_bytes = base64.b64decode(b64_data)
             with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
                 page = doc[0]
                 page_text = page.get_text("text")
-                full_text += page_text + "\n"
-                tabelas = []
-                for table in page.find_tables():
-                    extracted = table.extract()
-                    if extracted: tabelas.append(extracted)
-                tabela = tabelas[0] if tabelas else []
-                estrutura_tipo = classificar_estrutura(tabela, page_text)
-                unidade, setor, mes, ano = extrair_metadados(page_text, last_unidade, last_setor, last_mes, last_ano)
+
+                # Extração dos metadados (unidade, setor, mês/ano)
+                unidade_match = re.search(r'UNIDADE[:/\s-]*(.*?)(UNIDADE|SETOR|MÊS|ESCALA|$)', page_text.replace('\n', ' '), re.IGNORECASE)
+                setor_match = re.search(r'UNIDADE[\s/_\-]*SETOR[:/\s-]*(.*?)(MÊS|ESCALA|$)', page_text.replace('\n', ' '), re.IGNORECASE)
+                mes, ano = parse_mes_ano(page_text)
+                unidade = unidade_match.group(1).strip() if unidade_match else last_unidade
+                setor = setor_match.group(1).strip() if setor_match else last_setor
+                if mes is None: mes = last_mes
+                if ano is None: ano = last_ano
                 if unidade: last_unidade = unidade
                 if setor: last_setor = setor
                 if mes: last_mes = mes
                 if ano: last_ano = ano
 
-                # Herança de cabeçalho: se for tipo_1, usa o último cabeçalho válido
-                if estrutura_tipo == "tipo_1" and last_header_row and last_header_map is not None:
-                    all_table_rows.extend(tabela)
+                # Extração das tabelas (usando PyMuPDF Table API)
+                tabelas = []
+                for table in page.find_tables():
+                    extracted = table.extract()
+                    if extracted: tabelas.append(extracted)
+                tabela = tabelas[0] if tabelas else []
+
+                # Procura linha de cabeçalho
+                header_row = None
+                for row in tabela:
+                    if row and any("NOME" in str(cell).upper() and "COMPLETO" in str(cell).upper() for cell in row):
+                        # Corrige deslocamento por índice se presente
+                        if row[0] is None or (isinstance(row[0], str) and row[0].strip().isdigit()):
+                            header_row = row[1:]
+                        else:
+                            header_row = row
+                        # Normaliza header_row
+                        header_row = [str(cell).replace('\n', ' ').strip().upper() if cell else "" for cell in header_row]
+                        break
+
+                # Se não achar cabeçalho, usa o último válido
+                if header_row:
+                    last_header_row = header_row
+                    # Monta header_map
+                    header_map = {}
+                    for i, col_name in enumerate(header_row):
+                        if "NOME COMPLETO" in col_name: header_map["NOME COMPLETO"] = i
+                        elif "CARGO" in col_name: header_map["CARGO"] = i
+                        elif "VÍNCULO" in col_name or "VINCULO" in col_name: header_map["VÍNCULO"] = i
+                        elif "CONSELHO" in col_name or "CRM" in col_name: header_map["CRM"] = i
+                        elif col_name.isdigit(): header_map[int(col_name)] = i
+                    last_header_map = header_map
+                    all_table_rows.append(header_row)
+                    # Adiciona todas as linhas seguintes
+                    start_data = tabela.index(row) + 1
+                    for data_row in tabela[start_data:]:
+                        all_table_rows.append(data_row[1:] if (data_row and (data_row[0] is None or (isinstance(data_row[0], str) and data_row[0].strip().isdigit()))) else data_row)
                 else:
-                    # Procura linha do cabeçalho
-                    header_row = None
-                    for row in tabela:
-                        norm_row = normalizar_cabecalho(row)
-                        if any("NOME COMPLETO" in cell for cell in norm_row):
-                            header_row = norm_row
-                            break
-                    if header_row:
-                        last_header_row = header_row
-                        last_header_map = montar_header_map(header_row)
-                        all_table_rows.append(header_row)
-                        all_table_rows.extend(tabela[tabela.index(row)+1:])
-                    else:
-                        if tabela:  # Se não tem cabeçalho explícito, mas tem tabela
-                            if last_header_row:  # Herda
-                                all_table_rows.append(last_header_row)
-                            all_table_rows.extend(tabela)
-                        # Se não tem tabela, ignora
+                    if tabela and last_header_row:
+                        all_table_rows.append(last_header_row)
+                        for data_row in tabela:
+                            all_table_rows.append(data_row[1:] if (data_row and (data_row[0] is None or (isinstance(data_row[0], str) and data_row[0].strip().isdigit()))) else data_row)
+                    # Se não tem tabela, ignora
 
         if last_mes is None or last_ano is None:
             return JSONResponse(content={"error": "Mês/Ano não encontrados."}, status_code=400)
@@ -280,8 +237,14 @@ async def normaliza_escala_from_pdf(request: Request):
         while idx_linha < len(all_table_rows):
             row = all_table_rows[idx_linha]
             if row and any("NOME" in str(cell).upper() and "COMPLETO" in str(cell).upper() for cell in row):
-                header_row = normalizar_cabecalho(row)
-                header_map = montar_header_map(header_row)
+                header_row = [str(cell).replace('\n', ' ').strip().upper() if cell else "" for cell in row]
+                header_map = {}
+                for i, col_name in enumerate(header_row):
+                    if "NOME COMPLETO" in col_name: header_map["NOME COMPLETO"] = i
+                    elif "CARGO" in col_name: header_map["CARGO"] = i
+                    elif "VÍNCULO" in col_name or "VINCULO" in col_name: header_map["VÍNCULO"] = i
+                    elif "CONSELHO" in col_name or "CRM" in col_name: header_map["CRM"] = i
+                    elif col_name.isdigit(): header_map[int(col_name)] = i
                 nome_idx = header_map.get("NOME COMPLETO")
                 last_name = None
                 idx_linha += 1
@@ -291,8 +254,7 @@ async def normaliza_escala_from_pdf(request: Request):
                 idx_linha += 1
                 continue
 
-            # Corrige deslocamento por índice
-            if row and (not row[0] or str(row[0]).strip().isdigit()):
+            if row and (row[0] is None or (isinstance(row[0], str) and row[0].strip().isdigit())):
                 row = row[1:]
             if not row or len(row) <= nome_idx:
                 idx_linha += 1
