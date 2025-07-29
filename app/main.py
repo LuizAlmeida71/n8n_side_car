@@ -14,6 +14,8 @@ from datetime import datetime, timedelta
 import textwrap
 from fpdf import FPDF
 import hashlib
+import logging
+from typing import List
 
 app = FastAPI()
 
@@ -91,6 +93,10 @@ async def split_pdf(file: UploadFile = File(...)):
 # --- INÍCIO normaliza-escala-from-pdf ---
 # --- Inicialização da aplicação FastAPI ---
 app = FastAPI()
+
+# --- Configuração de logging ---
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # --- CONSTANTES ---
 MONTH_MAP = {
@@ -277,18 +283,20 @@ def process_professional_shifts(rows, start_idx, header_map, nome_idx, mes, ano)
     return professional, idx
 
 # --- ENDPOINT PRINCIPAL DA API ---
-
 @app.post("/normaliza-escala-from-pdf")
-async def normaliza_escala_from_pdf(request: Request):
+async def normaliza_escala_from_pdf(
+    files: List[UploadFile] = File(...)
+):
+    logger.info("Endpoint /normaliza-escala-from-pdf chamado")
     try:
-        body = await request.json()
         global_unidade, global_setor, global_mes, global_ano = None, None, None, None
         pages_content = []
-        last_header_map, last_nome_idx = None, None  # Armazena o último cabeçalho válido
+        last_header_map, last_nome_idx = None, None
 
-        # --- PASSADA 1: Coleta de dados globais e conteúdo bruto ---
-        for page_data in body:
-            pdf_bytes = base64.b64decode(page_data.get("bae64"))
+        # Processa cada arquivo enviado
+        for file in files:
+            logger.info(f"Processando arquivo: {file.filename}")
+            pdf_bytes = await file.read()
             page_rows = []
             with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
                 page = doc[0]
@@ -300,21 +308,19 @@ async def normaliza_escala_from_pdf(request: Request):
                 if mes: global_mes = mes
                 if ano: global_ano = ano
 
-                # Tenta extrair tabelas, mas usa texto bruto se falhar
                 tables = page.find_tables()
                 if tables:
                     for table in tables:
                         if table.extract():
                             for row in table.extract():
-                                page_rows.append(normalize_merged_cells(row))  # Normaliza mesclagens
+                                page_rows.append(normalize_merged_cells(row))
                 else:
-                    # Fallback: divide o texto em linhas e tenta reconstruir
                     lines = page_text.split('\n')
                     current_row = []
                     for line in lines:
                         if re.match(r'^\s*\|', line) or re.match(r'^\s*[A-Za-z]', line):
                             current_row.append(line.strip())
-                            if len(current_row) >= 5:  # Aproximação de largura de tabela
+                            if len(current_row) >= 5:
                                 page_rows.append(normalize_merged_cells(current_row))
                                 current_row = []
                     if current_row:
@@ -323,23 +329,22 @@ async def normaliza_escala_from_pdf(request: Request):
             pages_content.append({"rows": page_rows, "setor_pagina": setor})
 
         if not global_mes or not global_ano:
+            logger.error("Não foi possível determinar o Mês/Ano da escala")
             return JSONResponse(
                 content={"error": "Não foi possível determinar o Mês/Ano da escala a partir do documento."},
                 status_code=400
             )
 
-        # --- PASSADA 2: Processamento com lógica ajustada ---
         all_professionals_map = {}
         for page_idx, page in enumerate(pages_content):
             all_rows = page["rows"]
             setor_a_usar = page["setor_pagina"] or global_setor or "NÃO INFORMADO"
-            current_header_map, current_nome_idx = last_header_map, last_nome_idx  # Usa o último cabeçalho válido
+            current_header_map, current_nome_idx = last_header_map, last_nome_idx
 
-            # Valida continuidade com a página anterior
             if page_idx > 0 and last_header_map and all_rows:
                 prev_row_len = len(pages_content[page_idx-1]["rows"][0]) if pages_content[page_idx-1]["rows"] else 0
                 curr_row_len = len(all_rows[0]) if all_rows else 0
-                if abs(prev_row_len - curr_row_len) > 2:  # Tolerância para pequenas variações
+                if abs(prev_row_len - curr_row_len) > 2:
                     current_header_map, current_nome_idx = None, None
 
             i = 0
@@ -347,7 +352,7 @@ async def normaliza_escala_from_pdf(request: Request):
                 row = all_rows[i]
                 if is_header_row(row):
                     current_header_map, current_nome_idx = build_header_map(row)
-                    last_header_map, last_nome_idx = current_header_map, current_nome_idx  # Atualiza o último cabeçalho
+                    last_header_map, last_nome_idx = current_header_map, current_nome_idx
                     i += 1
                     continue
                 if not current_header_map or current_nome_idx is None or current_nome_idx >= len(row):
@@ -379,10 +384,11 @@ async def normaliza_escala_from_pdf(request: Request):
             "mes_ano_escala": f"{mes_nome}/{global_ano}",
             "profissionais": list(all_professionals_map.values())
         }]
-
+        logger.info(f"Resposta gerada: {result}")
         return JSONResponse(content=result)
 
     except Exception as e:
+        logger.error(f"Erro no endpoint: {str(e)}", exc_info=True)
         return JSONResponse(content={"error": str(e), "trace": traceback.format_exc()}, status_code=500)
 # --- FIM normaliza-escala-from-pdf ---
 
