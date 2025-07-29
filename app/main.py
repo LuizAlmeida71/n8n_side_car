@@ -94,8 +94,11 @@ async def split_pdf(file: UploadFile = File(...)):
 
 MONTH_MAP = {m: i+1 for i, m in enumerate(['JANEIRO', 'FEVEREIRO', 'MARÇO', 'ABRIL', 'MAIO', 'JUNHO', 'JULHO', 'AGOSTO', 'SETEMBRO', 'OUTUBRO', 'NOVEMBRO', 'DEZEMBRO'])}
 
-HEADER_PATTERNS = {
-    "padrao_1": ["NOME COMPLETO", "CARGO", "MATRÍCULA", "VÍNCULO", "CH", "HORÁRIO", "CONSELHO DE CLASSE"]
+HORARIOS_TURNO = {
+    "MANHÃ": {"inicio": "07:00", "fim": "13:00"},
+    "TARDE": {"inicio": "13:00", "fim": "19:00"},
+    "NOITE (início)": {"inicio": "19:00", "fim": "01:00"},
+    "NOITE (fim)": {"inicio": "01:00", "fim": "07:00"},
 }
 
 def parse_mes_ano(text):
@@ -105,35 +108,37 @@ def parse_mes_ano(text):
     return MONTH_MAP.get(mes_nome), int(ano_str)
 
 def interpretar_turno(token):
-    mapa = {
-        "M": [("07:00", "13:00")],
-        "T": [("13:00", "19:00")],
-        "N": [("19:00", "01:00"), ("01:00", "07:00")],
-        "D": [("07:00", "13:00"), ("13:00", "19:00")]
-    }
-    token = token.replace('/', '').upper()
-    turnos = []
-    for char in token:
-        if char in mapa:
-            for inicio, fim in mapa[char]:
-                turnos.append({"turno": char, "inicio": inicio, "fim": fim})
-    return turnos
+    token = token.replace('\n', '').replace('/', '').replace(' ', '').upper()
+    turnos_finais = []
+    for t in token:
+        if t == 'M': turnos_finais.append({"turno": "MANHÃ"})
+        elif t == 'T': turnos_finais.append({"turno": "TARDE"})
+        elif t == 'D':
+            turnos_finais.append({"turno": "MANHÃ"})
+            turnos_finais.append({"turno": "TARDE"})
+        elif t == 'N':
+            turnos_finais.append({"turno": "NOITE (início)"})
+            turnos_finais.append({"turno": "NOITE (fim)"})
+        elif t == 'n':
+            turnos_finais.append({"turno": "NOITE (início)"})
+    return turnos_finais
 
-def normalizar_tabela(tabela):
-    max_cols = max(len(row) for row in tabela)
-    return [[str(cell or '') for cell in row] + [""]*(max_cols - len(row)) for row in tabela]
+def is_valid_professional_name(name):
+    if not name or not isinstance(name, str): return False
+    name_upper = name.strip().upper()
+    ignored = ["NOME COMPLETO", "LEGENDA", "ASSINATURA", "ASSINADO", "COMPLETO", "CARGO", "MATRÍCULA"]
+    if any(keyword in name_upper for keyword in ignored): return False
+    return len(name.split()) >= 2 or name.isupper()
 
-def header_similarity(header_row, pattern):
-    matches = sum(a.strip().upper() == b for a, b in zip(header_row, pattern))
-    return matches / max(len(pattern), len(header_row))
-
-def find_pattern(header_row):
-    best_pattern, best_score = None, 0
-    for name, pattern in HEADER_PATTERNS.items():
-        score = header_similarity(header_row, pattern)
-        if score > best_score:
-            best_score, best_pattern = score, name
-    return best_pattern if best_score > 0.6 else None
+def dedup_plantao(lista):
+    seen = set()
+    result = []
+    for p in lista:
+        key = (p["dia"], p["turno"], p["inicio"], p["fim"])
+        if key not in seen:
+            seen.add(key)
+            result.append(p)
+    return result
 
 def extrair_metadados_pagina(page_text):
     unidade = re.search(r'UNIDADE[:\s-]*(.+?)(UNIDADE|SETOR|MÊS|ESCALA|$)', page_text.replace('\n', ' '), re.I)
@@ -145,14 +150,13 @@ async def normaliza_escala_from_pdf(request: Request):
     try:
         body = await request.json()
         pages = body["pages"] if isinstance(body, dict) else body
-        last_pattern_name = last_header_row = last_unidade = last_setor = None
-        last_mes = last_ano = None
-        all_rows = []
+        all_table_rows, last_unidade, last_setor, last_mes, last_ano = [], None, None, None, None
 
         for page_data in pages:
             b64_data = page_data.get("file_base64") or page_data.get("bae64") or page_data.get("base64")
-            pdf_bytes = base64.b64decode(b64_data)
+            if not b64_data: continue
 
+            pdf_bytes = base64.b64decode(b64_data)
             with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
                 page_text = doc[0].get_text("text")
                 unidade, setor = extrair_metadados_pagina(page_text)
@@ -163,30 +167,61 @@ async def normaliza_escala_from_pdf(request: Request):
                 if ano: last_ano = ano
 
                 tabelas = [t.extract() for t in doc[0].find_tables() if t.extract()]
-                if not tabelas: continue
-                tabela = normalizar_tabela(tabelas[0])
+                if tabelas:
+                    tabela = tabelas[0]
+                    all_table_rows.extend(tabela)
 
-                header_row = next((row for row in tabela if "NOME COMPLETO" in ''.join([str(cell or '') for cell in row]).upper()), None)
-                if header_row:
-                    pattern_name = find_pattern(header_row) or f"novo_{len(HEADER_PATTERNS)+1}"
-                    if pattern_name.startswith("novo"):
-                        HEADER_PATTERNS[pattern_name] = header_row
-                    last_pattern_name, last_header_row = pattern_name, header_row
-                    idx = tabela.index(header_row)
-                    all_rows += tabela[idx+1:]
-                else:
-                    all_rows += tabela
+        header_map, nome_idx, profissionais_data = {}, None, defaultdict(lambda: {"info_rows": []})
+        last_name = None
 
-        if not last_pattern_name: return JSONResponse({"error": "Padrão não detectado."}, 400)
+        for row in all_table_rows:
+            if any("NOME" in (str(cell) or '').upper() for cell in row):
+                header_map = {str(col).strip().upper(): idx for idx, col in enumerate(row)}
+                nome_idx = header_map.get("NOME COMPLETO")
+                continue
 
-        profissionais = []
-        for row in all_rows:
-            nome = row[0].strip()
-            if nome:
-                profissionais.append({"medico_nome": nome, "setor": last_setor, "plantoes": sorted(interpretar_turno(''.join(row[1:])), key=lambda x: x["inicio"])})
+            if nome_idx is None: continue
+            nome_bruto = row[nome_idx]
+            if nome_bruto and is_valid_professional_name(nome_bruto):
+                last_name = nome_bruto.strip()
+            elif nome_bruto and last_name and len(nome_bruto.strip().split()) == 1:
+                last_name += f" {nome_bruto.strip()}"
 
-        mes_nome = [k for k,v in MONTH_MAP.items() if v == last_mes][0]
-        return JSONResponse([{ "unidade": last_unidade, "setor": last_setor, "mes_ano": f"{mes_nome}/{last_ano}", "profissionais": profissionais }])
+            if last_name:
+                profissionais_data[last_name]["info_rows"].append(row)
+
+        lista_profissionais_final = []
+        for nome, data in profissionais_data.items():
+            profissional_obj = {
+                "medico_nome": nome,
+                "medico_setor": last_setor or "NÃO INFORMADO",
+                "plantoes": []
+            }
+            for row in data["info_rows"]:
+                for dia, idx in header_map.items():
+                    if isinstance(dia, int) and idx < len(row) and row[idx]:
+                        tokens = interpretar_turno(row[idx])
+                        for token in tokens:
+                            horarios = HORARIOS_TURNO.get(token["turno"], {})
+                            dia_plantao = datetime(last_ano, last_mes, int(dia))
+                            if token["turno"] == "NOITE (fim)": dia_plantao += timedelta(days=1)
+                            profissional_obj["plantoes"].append({
+                                "dia": dia_plantao.day,
+                                "data": dia_plantao.strftime('%d/%m/%Y'),
+                                "turno": token["turno"],
+                                "inicio": horarios["inicio"],
+                                "fim": horarios["fim"]
+                            })
+
+            profissional_obj["plantoes"] = sorted(dedup_plantao(profissional_obj["plantoes"]), key=lambda x: (x["dia"], x["inicio"]))
+            lista_profissionais_final.append(profissional_obj)
+
+        mes_nome_str = [k for k, v in MONTH_MAP.items() if v == last_mes][0]
+        return JSONResponse([{
+            "unidade_escala": last_unidade or "NÃO INFORMADO",
+            "mes_ano_escala": f"{mes_nome_str}/{last_ano}",
+            "profissionais": lista_profissionais_final
+        }])
 
     except Exception as e:
         return JSONResponse({"error": str(e), "trace": traceback.format_exc()}, 500)
