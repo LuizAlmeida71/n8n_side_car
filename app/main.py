@@ -103,16 +103,12 @@ HORARIOS_TURNO = {
     "NOITE (fim)": {"inicio": "01:00", "fim": "07:00"},
 }
 
-# --- FUNÇÕES AUXILIARES DE EXTRAÇÃO E LIMPEZA ---
+# --- FUNÇÕES AUXILIARES (sem alterações) ---
 
 def parse_mes_ano(text):
-    """Extrai mês e ano do texto com múltiplos padrões."""
     patterns = [
-        r'MÊS[\s/:]*([A-ZÇÃ]+)[\s/]*(\d{4})',
-        r'MES/ANO:\s*([A-ZÇÃ]+)\s*/\s*(\d{4})',
-        r'([A-ZÇÃ]+)/(\d{4})',
-        r'MÊS:\s*([A-ZÇÃ]+)',
-        r'([A-ZÇÃ]+)\s+(\d{4})'
+        r'MÊS[\s/:]*([A-ZÇÃ]+)[\s/]*(\d{4})', r'MES/ANO:\s*([A-ZÇÃ]+)\s*/\s*(\d{4})',
+        r'([A-ZÇÃ]+)/(\d{4})', r'MÊS:\s*([A-ZÇÃ]+)', r'([A-ZÇÃ]+)\s+(\d{4})'
     ]
     text_upper = text.upper()
     mes, ano = None, None
@@ -132,7 +128,6 @@ def parse_mes_ano(text):
     return mes, ano
 
 def extract_unidade_setor_from_text(page_text):
-    """Extrai UNIDADE e SETOR de forma robusta a partir do texto da página."""
     unidade, setor = None, None
     unidade_patterns = [
         r'UNIDADE:\s*([^/\n]+?)(?:\s*UNIDADE\s*SETOR:|/|$)',
@@ -162,14 +157,10 @@ def extract_unidade_setor_from_text(page_text):
     return unidade, setor
 
 def clean_cell_value(value):
-    """Limpa e normaliza o valor de uma célula."""
     if not value: return ""
     return ' '.join(str(value).replace('\n', ' ').split())
 
-# --- FUNÇÕES DE PROCESSAMENTO DE TABELA ---
-
 def is_header_row(row):
-    """Identifica se uma linha é um cabeçalho de tabela."""
     if not row or len(row) < 3: return False
     row_text = ' '.join([str(cell) for cell in row if cell]).upper()
     header_indicators = ['NOME', 'CARGO', 'MATRÍCULA', 'VÍNCULO', 'CONSELHO', 'HORÁRIO', 'C.H']
@@ -178,7 +169,6 @@ def is_header_row(row):
     return indicator_count >= 2 or day_count >= 10
 
 def build_header_map(row):
-    """Constrói um mapeamento de coluna (cabeçalho) a partir de uma linha."""
     header_map, nome_idx = {}, None
     start_col = 1 if row and row[0] and (str(row[0]).isdigit() or str(row[0]).strip() in ['#', 'Nº']) else 0
     for i, cell in enumerate(row[start_col:], start=start_col):
@@ -199,7 +189,6 @@ def build_header_map(row):
     return header_map, nome_idx
 
 def is_valid_professional_name(name):
-    """Verifica se uma string parece ser um nome de profissional válido."""
     if not name or not isinstance(name, str) or len(name.strip()) < 4: return False
     name_clean = name.upper().strip()
     invalid_keywords = ['NOME COMPLETO', 'CARGO', 'MATRÍCULA', 'HORÁRIO', 'LEGENDA', 'ASSINATURA', 'UNIDADE', 'SETOR']
@@ -208,7 +197,6 @@ def is_valid_professional_name(name):
     return len(name_clean.split()) >= 2
 
 def interpretar_turno(token):
-    """Interpreta os tokens de turno (M, T, D, N) de forma precisa."""
     turnos = []
     if not token: return turnos
     token_clean = token.upper().strip()
@@ -232,12 +220,10 @@ def interpretar_turno(token):
     return unique_turnos
 
 def process_professional_shifts(rows, start_idx, header_map, nome_idx, mes, ano):
-    """Processa um profissional e todas as suas linhas de continuação, retornando seus dados e plantões."""
     current_row = rows[start_idx]
     nome = clean_cell_value(current_row[nome_idx])
     info = {key: clean_cell_value(current_row[idx]) for key, idx in header_map.items() if isinstance(key, str) and idx < len(current_row)}
     professional = {"medico_nome": nome, "medico_crm": info.get("CRM", "N/I"), "medico_especialidade": info.get("CARGO", "N/I"), "medico_vinculo": info.get("VÍNCULO", "N/I"), "plantoes_raw": defaultdict(list)}
-    
     idx = start_idx
     while idx < len(rows):
         row_to_process = rows[idx]
@@ -249,7 +235,6 @@ def process_professional_shifts(rows, start_idx, header_map, nome_idx, mes, ano)
                 token = clean_cell_value(row_to_process[col_idx])
                 if token: professional["plantoes_raw"][dia].append(token)
         idx += 1
-        
     plantoes_final = []
     for dia, tokens in professional["plantoes_raw"].items():
         for token in set(tokens):
@@ -261,7 +246,6 @@ def process_professional_shifts(rows, start_idx, header_map, nome_idx, mes, ano)
                     if turno_info["turno"] == "NOITE (fim)": data_plantao += timedelta(days=1)
                     plantoes_final.append({"dia": data_plantao.day, "data": data_plantao.strftime('%d/%m/%Y'), "turno": turno_info["turno"], "inicio": horarios.get("inicio"), "fim": horarios.get("fim")})
                 except ValueError: continue
-    
     seen = set()
     plantoes_dedup = []
     for p in plantoes_final:
@@ -269,7 +253,6 @@ def process_professional_shifts(rows, start_idx, header_map, nome_idx, mes, ano)
         if pkey not in seen:
             seen.add(pkey)
             plantoes_dedup.append(p)
-    
     professional["plantoes"] = sorted(plantoes_dedup, key=lambda p: (datetime.strptime(p["data"], '%d/%m/%Y'), p.get("inicio", "")))
     del professional["plantoes_raw"]
     return professional, idx
@@ -278,59 +261,59 @@ def process_professional_shifts(rows, start_idx, header_map, nome_idx, mes, ano)
 
 @app.post("/normaliza-escala-from-pdf")
 async def normaliza_escala_from_pdf(request: Request):
-    """
-    Recebe um ou mais PDFs em Base64, extrai, normaliza e retorna os dados da escala de plantão.
-    """
     try:
         body = await request.json()
-        
         global_unidade, global_setor, global_mes, global_ano = None, None, None, None
         pages_content = []
 
-        # --- PRIMEIRA PASSADA: Coleta de dados globais e conteúdo bruto das tabelas ---
+        # --- PASSADA 1: Coleta de dados globais e conteúdo bruto ---
         for page_data in body:
             pdf_bytes = base64.b64decode(page_data.get("bae64"))
             page_rows = []
             with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
                 page = doc[0]
                 page_text = page.get_text("text")
-
                 unidade, setor = extract_unidade_setor_from_text(page_text)
                 mes, ano = parse_mes_ano(page_text)
-
                 if unidade: global_unidade = unidade
                 if setor: global_setor = setor
                 if mes: global_mes = mes
                 if ano: global_ano = ano
-                
                 for table in page.find_tables():
                     if table.extract():
                         page_rows.extend(table.extract())
             pages_content.append({"rows": page_rows, "setor_pagina": setor})
 
-        # --- VALIDAÇÃO: Garante que mês e ano foram encontrados antes de prosseguir ---
+        # --- VALIDAÇÃO ---
         if not global_mes or not global_ano:
             return JSONResponse(
                 content={"error": "Não foi possível determinar o Mês/Ano da escala a partir do documento."}, 
                 status_code=400
             )
 
-        # --- SEGUNDA PASSADA: Processamento das tabelas com dados globais já conhecidos ---
+        # --- PASSADA 2: Processamento com estado persistente ---
         all_professionals_map = {}
+        # **** ALTERAÇÃO CRÍTICA: Inicialização do estado ANTES do loop de páginas ****
+        current_header_map, current_nome_idx = None, None
+        
         for page in pages_content:
             all_rows = page["rows"]
             setor_a_usar = page["setor_pagina"] or global_setor or "NÃO INFORMADO"
-            current_header_map, current_nome_idx = None, None
+            
             i = 0
             while i < len(all_rows):
                 row = all_rows[i]
                 if is_header_row(row):
+                    # Atualiza o estado do cabeçalho sempre que um novo for encontrado
                     current_header_map, current_nome_idx = build_header_map(row)
                     i += 1
                     continue
+
+                # Se não houver um cabeçalho (nem nesta página nem nas anteriores), pula a linha
                 if not current_header_map or current_nome_idx is None or current_nome_idx >= len(row):
                     i += 1
                     continue
+
                 nome_raw = row[current_nome_idx]
                 if is_valid_professional_name(nome_raw):
                     professional, next_i = process_professional_shifts(all_rows, i, current_header_map, current_nome_idx, global_mes, global_ano)
