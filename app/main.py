@@ -100,12 +100,16 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 import fitz
 
+app = FastAPI()
+
 MONTH_MAP = {
     'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
     'JUNHO': 6, 'JULHO': 7, 'AGOSTO': 8, 'SETEMBRO': 9, 'OUTUBRO': 10,
     'NOVEMBRO': 11, 'DEZEMBRO': 12
 }
-HORARIOS_TURNO = {
+
+# Horários fixos do modelo convencional
+TURNOS = {
     "MANHÃ": {"inicio": "07:00", "fim": "13:00"},
     "TARDE": {"inicio": "13:00", "fim": "19:00"},
     "NOITE (início)": {"inicio": "19:00", "fim": "01:00"},
@@ -120,23 +124,29 @@ def parse_mes_ano(text):
     ano = int(ano_str)
     return mes, ano
 
-def interpretar_turno(token, medico_setor):
-    if not token or not isinstance(token, str): return []
-    token_clean = token.replace('\n', '').replace('/', '').replace(' ', '')
-    tokens = list(token_clean)
-    turnos_finais = []
-    for t in tokens:
-        if t == 'M': turnos_finais.append({"turno": "MANHÃ"})
-        elif t == 'T': turnos_finais.append({"turno": "TARDE"})
-        elif t == 'D':
-            turnos_finais.append({"turno": "MANHÃ"})
-            turnos_finais.append({"turno": "TARDE"})
-        elif t == 'N':
-            turnos_finais.append({"turno": "NOITE (início)"})
-            turnos_finais.append({"turno": "NOITE (fim)"})
-        elif t == 'n':
-            turnos_finais.append({"turno": "NOITE (início)"})
-    return turnos_finais
+def interpretar_turno(token):
+    """
+    Interpreta uma string de turnos e retorna todos os turnos daquele dia conforme regras:
+    M = Manhã (07:00-13:00)
+    T = Tarde (13:00-19:00)
+    N = Noite (19:00-01:00) + (01:00-07:00) (dois lançamentos)
+    D = Manhã e Tarde (07:00-13:00 e 13:00-19:00)
+    Combinações: Ex. 'MTN' -> todos
+    """
+    token_clean = token.replace('\n', '').replace('/', '').replace(' ', '').upper()
+    turnos = []
+    for c in token_clean:
+        if c == "M":
+            turnos.append({"turno": "MANHÃ", **TURNOS["MANHÃ"]})
+        elif c == "T":
+            turnos.append({"turno": "TARDE", **TURNOS["TARDE"]})
+        elif c == "N":
+            turnos.append({"turno": "NOITE (início)", **TURNOS["NOITE (início)"]})
+            turnos.append({"turno": "NOITE (fim)", **TURNOS["NOITE (fim)"]})
+        elif c == "D":
+            turnos.append({"turno": "MANHÃ", **TURNOS["MANHÃ"]})
+            turnos.append({"turno": "TARDE", **TURNOS["TARDE"]})
+    return turnos
 
 def is_valid_professional_name(name):
     if not name or not isinstance(name, str): return False
@@ -159,14 +169,11 @@ def dedup_plantao(lista):
 async def normaliza_escala_from_pdf(request: Request):
     try:
         body = await request.json()
-        # Suporta entrada como lista OU dicionário com "pages"
-        if isinstance(body, dict) and "pages" in body:
-            pages = body["pages"]
-        elif isinstance(body, list):
-            pages = body
-        else:
-            return JSONResponse(content={"error": "Formato de entrada inválido"}, status_code=400)
-        
+        if not (isinstance(body, dict) and "pages" in body and isinstance(body["pages"], list) and body["pages"]):
+            return JSONResponse(content={
+                "error": "Formato de entrada inválido: esperado { 'pages': [ { 'file_base64': ... }, ... ] }"
+            }, status_code=400)
+
         all_table_rows = []
         last_header_row = None
         last_header_map = None
@@ -174,26 +181,27 @@ async def normaliza_escala_from_pdf(request: Request):
         last_unidade = None
         last_mes, last_ano = None, None
 
-        for page_idx, page_data in enumerate(pages):
-            # Para máxima compatibilidade (vários padrões de campo base64)
-            b64_data = (
-                page_data.get("file_base64") or 
-                page_data.get("bae64") or 
-                page_data.get("base64")
-            )
+        for page_idx, page_data in enumerate(body["pages"]):
+            b64_data = page_data.get("file_base64")
             if not b64_data:
-                continue
+                return JSONResponse(content={
+                    "error": f"Página {page_idx+1} sem 'file_base64' no input."
+                }, status_code=400)
             pdf_bytes = base64.b64decode(b64_data)
             with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
                 page = doc[0]
                 page_text = page.get_text("text")
 
-                # Extração dos metadados (unidade, setor, mês/ano)
-                unidade_match = re.search(r'UNIDADE[:/\s-]*(.*?)(UNIDADE|SETOR|MÊS|ESCALA|$)', page_text.replace('\n', ' '), re.IGNORECASE)
-                setor_match = re.search(r'UNIDADE[\s/_\-]*SETOR[:/\s-]*(.*?)(MÊS|ESCALA|$)', page_text.replace('\n', ' '), re.IGNORECASE)
-                mes, ano = parse_mes_ano(page_text)
-                unidade = unidade_match.group(1).strip() if unidade_match else last_unidade
+                # Extração robusta do SETOR (pega tudo após "UNIDADE SETOR:" até fim da linha)
+                setor_match = re.search(r'UNIDADE\s*SETOR[:\s\-]*([^\n\r]+)', page_text, re.IGNORECASE)
                 setor = setor_match.group(1).strip() if setor_match else last_setor
+
+                # UNIDADE
+                unidade_match = re.search(r'UNIDADE[:\s\-]*([^\n\r]+)', page_text, re.IGNORECASE)
+                unidade = unidade_match.group(1).strip() if unidade_match else last_unidade
+
+                # MÊS/ANO
+                mes, ano = parse_mes_ano(page_text)
                 if mes is None: mes = last_mes
                 if ano is None: ano = last_ano
                 if unidade: last_unidade = unidade
@@ -201,7 +209,6 @@ async def normaliza_escala_from_pdf(request: Request):
                 if mes: last_mes = mes
                 if ano: last_ano = ano
 
-                # Extração das tabelas (usando PyMuPDF Table API)
                 tabelas = []
                 for table in page.find_tables():
                     extracted = table.extract()
@@ -217,14 +224,11 @@ async def normaliza_escala_from_pdf(request: Request):
                             header_row = row[1:]
                         else:
                             header_row = row
-                        # Normaliza header_row
                         header_row = [str(cell).replace('\n', ' ').strip().upper() if cell else "" for cell in header_row]
                         break
 
-                # Se não achar cabeçalho, usa o último válido
                 if header_row:
                     last_header_row = header_row
-                    # Monta header_map
                     header_map = {}
                     for i, col_name in enumerate(header_row):
                         if "NOME COMPLETO" in col_name: header_map["NOME COMPLETO"] = i
@@ -234,7 +238,6 @@ async def normaliza_escala_from_pdf(request: Request):
                         elif col_name.isdigit(): header_map[int(col_name)] = i
                     last_header_map = header_map
                     all_table_rows.append(header_row)
-                    # Adiciona todas as linhas seguintes
                     start_data = tabela.index(row) + 1
                     for data_row in tabela[start_data:]:
                         all_table_rows.append(data_row[1:] if (data_row and (data_row[0] is None or (isinstance(data_row[0], str) and data_row[0].strip().isdigit()))) else data_row)
@@ -243,12 +246,10 @@ async def normaliza_escala_from_pdf(request: Request):
                         all_table_rows.append(last_header_row)
                         for data_row in tabela:
                             all_table_rows.append(data_row[1:] if (data_row and (data_row[0] is None or (isinstance(data_row[0], str) and data_row[0].strip().isdigit()))) else data_row)
-                    # Se não tem tabela, ignora
 
         if last_mes is None or last_ano is None:
             return JSONResponse(content={"error": "Mês/Ano não encontrados."}, status_code=400)
 
-        # --- PROCESSAMENTO POR BLOCOS DE CABEÇALHO ---
         profissionais_data = defaultdict(lambda: {"info_rows": []})
         header_map = None
         nome_idx = None
@@ -313,35 +314,37 @@ async def normaliza_escala_from_pdf(request: Request):
 
             for dia, tokens in sorted(plantoes_brutos.items()):
                 for token in tokens:
-                    turnos = interpretar_turno(token, last_setor or "")
+                    turnos = interpretar_turno(token)
                     data_plantao = datetime(last_ano, last_mes, dia)
                     for turno_info in turnos:
-                        horarios = HORARIOS_TURNO.get(turno_info["turno"], {})
+                        # Se for "NOITE (fim)", joga para o dia seguinte
                         if turno_info["turno"] == "NOITE (fim)":
                             data_fim = data_plantao + timedelta(days=1)
                             profissional_obj["plantoes"].append({
                                 "dia": data_fim.day,
                                 "data": data_fim.strftime('%d/%m/%Y'),
                                 "turno": turno_info["turno"],
-                                "inicio": horarios.get("inicio"),
-                                "fim": horarios.get("fim")
+                                "inicio": turno_info["inicio"],
+                                "fim": turno_info["fim"]
                             })
                         else:
                             profissional_obj["plantoes"].append({
                                 "dia": data_plantao.day,
                                 "data": data_plantao.strftime('%d/%m/%Y'),
                                 "turno": turno_info["turno"],
-                                "inicio": horarios.get("inicio"),
-                                "fim": horarios.get("fim")
+                                "inicio": turno_info["inicio"],
+                                "fim": turno_info["fim"]
                             })
             profissional_obj["plantoes"] = dedup_plantao(profissional_obj["plantoes"])
+            # Ordena os plantões pelo horário de início
+            profissional_obj["plantoes"].sort(key=lambda p: (p["dia"], p["inicio"] or ""))
             if profissional_obj["plantoes"]:
-                profissional_obj["plantoes"].sort(key=lambda p: (p["dia"], p["inicio"] or ""))
                 lista_profissionais_final.append(profissional_obj)
 
         mes_nome_str = list(MONTH_MAP.keys())[list(MONTH_MAP.values()).index(last_mes)]
         final_output = [{
             "unidade_escala": last_unidade or "NÃO INFORMADO",
+            "setor_escala": last_setor or "NÃO INFORMADO",
             "mes_ano_escala": f"{mes_nome_str}/{last_ano}",
             "profissionais": lista_profissionais_final
         }]
