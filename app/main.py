@@ -156,7 +156,7 @@ async def normaliza_escala_from_pdf(request: Request):
                     tabela = tabelas[0]
                     all_table_rows.extend(tabela)
 
-        header_row = next((row for row in all_table_rows if "NOME COMPLETO" in ''.join(row).upper()), None)
+        header_row = next((row for row in all_table_rows if "NOME COMPLETO" in ''.join([str(cell or '') for cell in row]).upper()), None)
         if not header_row:
             return JSONResponse({"error": "Cabeçalho não encontrado."}, status_code=400)
 
