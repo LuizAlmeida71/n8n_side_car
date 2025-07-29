@@ -91,6 +91,17 @@ async def split_pdf(file: UploadFile = File(...)):
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 # --- INÍCIO normaliza-escala-from-pdf ---
+import re
+import base64
+import traceback
+from datetime import datetime, timedelta
+from collections import defaultdict
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+import fitz
+
+app = FastAPI()
+
 MONTH_MAP = {
     'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
     'JUNHO': 6, 'JULHO': 7, 'AGOSTO': 8, 'SETEMBRO': 9, 'OUTUBRO': 10,
@@ -150,7 +161,14 @@ def dedup_plantao(lista):
 async def normaliza_escala_from_pdf(request: Request):
     try:
         body = await request.json()
-        # Corrigido: Consome body["pages"] e "file_base64"
+        # Suporta entrada como lista OU dicionário com "pages"
+        if isinstance(body, dict) and "pages" in body:
+            pages = body["pages"]
+        elif isinstance(body, list):
+            pages = body
+        else:
+            return JSONResponse(content={"error": "Formato de entrada inválido"}, status_code=400)
+        
         all_table_rows = []
         last_header_row = None
         last_header_map = None
@@ -158,8 +176,13 @@ async def normaliza_escala_from_pdf(request: Request):
         last_unidade = None
         last_mes, last_ano = None, None
 
-        for page_idx, page_data in enumerate(body["pages"]):
-            b64_data = page_data.get("file_base64")
+        for page_idx, page_data in enumerate(pages):
+            # Para máxima compatibilidade (vários padrões de campo base64)
+            b64_data = (
+                page_data.get("file_base64") or 
+                page_data.get("bae64") or 
+                page_data.get("base64")
+            )
             if not b64_data:
                 continue
             pdf_bytes = base64.b64decode(b64_data)
