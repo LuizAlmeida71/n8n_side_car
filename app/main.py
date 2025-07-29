@@ -249,23 +249,6 @@ async def text_to_pdf(request: Request):
 
 
 # --- INICIO normaliza-escala-HC ---
-import base64
-import re
-import traceback
-from collections import defaultdict
-from datetime import datetime, timedelta
-
-import fitz  # PyMuPDF
-import uvicorn
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-
-# --- Inicialização da Aplicação ---
-app = FastAPI(
-    title="API de Normalização de Escalas",
-    description="Processa PDFs de escalas médicas e extrai os dados em formato JSON."
-)
-
 # --- Constantes e Mapas ---
 MONTH_MAP = {
     'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
