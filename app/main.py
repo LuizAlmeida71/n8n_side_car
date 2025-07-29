@@ -111,34 +111,19 @@ def interpretar_turno(token):
     token = token.replace('\n', '').replace('/', '').replace(' ', '').upper()
     turnos_finais = []
     for t in token:
-        if t == 'M': turnos_finais.append({"turno": "MANHÃ"})
-        elif t == 'T': turnos_finais.append({"turno": "TARDE"})
-        elif t == 'D':
-            turnos_finais.append({"turno": "MANHÃ"})
-            turnos_finais.append({"turno": "TARDE"})
-        elif t == 'N':
-            turnos_finais.append({"turno": "NOITE (início)"})
-            turnos_finais.append({"turno": "NOITE (fim)"})
-        elif t == 'n':
-            turnos_finais.append({"turno": "NOITE (início)"})
+        if t == 'M': turnos_finais.append("MANHÃ")
+        elif t == 'T': turnos_finais.append("TARDE")
+        elif t == 'D': turnos_finais.extend(["MANHÃ", "TARDE"])
+        elif t == 'N': turnos_finais.extend(["NOITE (início)", "NOITE (fim)"])
+        elif t == 'n': turnos_finais.append("NOITE (início)")
     return turnos_finais
 
 def is_valid_professional_name(name):
     if not name or not isinstance(name, str): return False
     name_upper = name.strip().upper()
-    ignored = ["NOME COMPLETO", "LEGENDA", "ASSINATURA", "ASSINADO", "COMPLETO", "CARGO", "MATRÍCULA"]
+    ignored = ["NOME COMPLETO", "LEGENDA", "ASSINATURA", "ASSINADO", "COMPLETO", "CARGO", "MATRÍCULA", "UNIDADE", "SETOR", "MÊS"]
     if any(keyword in name_upper for keyword in ignored): return False
-    return len(name.split()) >= 2 or name.isupper()
-
-def dedup_plantao(lista):
-    seen = set()
-    result = []
-    for p in lista:
-        key = (p["dia"], p["turno"], p["inicio"], p["fim"])
-        if key not in seen:
-            seen.add(key)
-            result.append(p)
-    return result
+    return len(name.strip().split()) >= 2
 
 def extrair_metadados_pagina(page_text):
     unidade = re.search(r'UNIDADE[:\s-]*(.+?)(UNIDADE|SETOR|MÊS|ESCALA|$)', page_text.replace('\n', ' '), re.I)
@@ -171,50 +156,39 @@ async def normaliza_escala_from_pdf(request: Request):
                     tabela = tabelas[0]
                     all_table_rows.extend(tabela)
 
-        header_map, nome_idx, profissionais_data = {}, None, defaultdict(lambda: {"info_rows": []})
-        last_name = None
+        header_row = next((row for row in all_table_rows if "NOME COMPLETO" in ''.join(row).upper()), None)
+        if not header_row:
+            return JSONResponse({"error": "Cabeçalho não encontrado."}, status_code=400)
 
-        for row in all_table_rows:
-            if any("NOME" in (str(cell) or '').upper() for cell in row):
-                header_map = {str(col).strip().upper(): idx for idx, col in enumerate(row)}
-                nome_idx = header_map.get("NOME COMPLETO")
-                continue
+        header_map = {idx: col for idx, col in enumerate(header_row) if str(col).strip().isdigit()}
+        nome_idx = header_row.index(next(col for col in header_row if "NOME COMPLETO" in col.upper()))
 
-            if nome_idx is None: continue
+        profissionais_data = defaultdict(lambda: defaultdict(list))
+        for row in all_table_rows[all_table_rows.index(header_row)+1:]:
             nome_bruto = row[nome_idx]
-            if nome_bruto and is_valid_professional_name(nome_bruto):
-                last_name = nome_bruto.strip()
-            elif nome_bruto and last_name and len(nome_bruto.strip().split()) == 1:
-                last_name += f" {nome_bruto.strip()}"
+            if not is_valid_professional_name(nome_bruto): continue
+            nome = ' '.join(nome_bruto.split())
 
-            if last_name:
-                profissionais_data[last_name]["info_rows"].append(row)
+            for idx, dia in header_map.items():
+                if idx < len(row) and row[idx]:
+                    turnos = interpretar_turno(row[idx])
+                    for turno in turnos:
+                        horarios = HORARIOS_TURNO.get(turno)
+                        dia_plantao = datetime(last_ano, last_mes, int(dia))
+                        if turno == "NOITE (fim)": dia_plantao += timedelta(days=1)
+                        profissionais_data[nome]["plantoes"].append({
+                            "dia": dia_plantao.day,
+                            "data": dia_plantao.strftime('%d/%m/%Y'),
+                            "turno": turno,
+                            "inicio": horarios["inicio"],
+                            "fim": horarios["fim"]
+                        })
 
-        lista_profissionais_final = []
-        for nome, data in profissionais_data.items():
-            profissional_obj = {
-                "medico_nome": nome,
-                "medico_setor": last_setor or "NÃO INFORMADO",
-                "plantoes": []
-            }
-            for row in data["info_rows"]:
-                for dia, idx in header_map.items():
-                    if isinstance(dia, int) and idx < len(row) and row[idx]:
-                        tokens = interpretar_turno(row[idx])
-                        for token in tokens:
-                            horarios = HORARIOS_TURNO.get(token["turno"], {})
-                            dia_plantao = datetime(last_ano, last_mes, int(dia))
-                            if token["turno"] == "NOITE (fim)": dia_plantao += timedelta(days=1)
-                            profissional_obj["plantoes"].append({
-                                "dia": dia_plantao.day,
-                                "data": dia_plantao.strftime('%d/%m/%Y'),
-                                "turno": token["turno"],
-                                "inicio": horarios["inicio"],
-                                "fim": horarios["fim"]
-                            })
-
-            profissional_obj["plantoes"] = sorted(dedup_plantao(profissional_obj["plantoes"]), key=lambda x: (x["dia"], x["inicio"]))
-            lista_profissionais_final.append(profissional_obj)
+        lista_profissionais_final = [{
+            "medico_nome": nome,
+            "medico_setor": last_setor or "NÃO INFORMADO",
+            "plantoes": sorted(plantoes["plantoes"], key=lambda x: (datetime.strptime(x["data"], '%d/%m/%Y'), x["inicio"]))
+        } for nome, plantoes in profissionais_data.items()]
 
         mes_nome_str = [k for k, v in MONTH_MAP.items() if v == last_mes][0]
         return JSONResponse([{
@@ -224,7 +198,7 @@ async def normaliza_escala_from_pdf(request: Request):
         }])
 
     except Exception as e:
-        return JSONResponse({"error": str(e), "trace": traceback.format_exc()}, 500)
+        return JSONResponse({"error": str(e), "trace": traceback.format_exc()}, status_code=500)
 
 # --- FIM normaliza-escala-from-pdf ---
 
