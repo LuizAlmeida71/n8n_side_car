@@ -89,6 +89,16 @@ async def split_pdf(file: UploadFile = File(...)):
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 # --- INÍCIO normaliza-escala-from-pdf ---
+import re
+import base64
+import fitz
+from datetime import datetime, timedelta
+from collections import defaultdict
+from fastapi import Request
+from fastapi.responses import JSONResponse
+import traceback
+import hashlib
+
 # --- CONSTANTES ---
 MONTH_MAP = {
     'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
@@ -143,9 +153,9 @@ class EscalaPattern:
         # Extração com coluna numérica
         return self._extrair_generico(rows, header_map, nome_idx)
     
-    def _extrair_generico(self, rows, header_map, nome_idx):
+    def _extrair_generico(self, rows, header_map, nome_idx, mes=None, ano=None):
         # Implementação genérica melhorada
-        return extrair_profissionais_melhorado(rows, header_map, nome_idx)
+        return extrair_profissionais_melhorado(rows, header_map, nome_idx, mes, ano)
     
     def _desfazer_mesclagens(self, rows):
         """Desfaz mesclagens identificadas nas células"""
@@ -355,7 +365,7 @@ def is_valid_professional_name_melhorado(name):
     
     return True
 
-def extrair_profissionais_melhorado(rows, header_map, nome_idx):
+def extrair_profissionais_melhorado(rows, header_map, nome_idx, mes=None, ano=None):
     """Extração melhorada de profissionais"""
     profissionais = []
     i = 0
@@ -371,7 +381,7 @@ def extrair_profissionais_melhorado(rows, header_map, nome_idx):
         
         if is_valid_professional_name_melhorado(nome_raw):
             professional, next_i = process_professional_shifts_melhorado(
-                rows, i, header_map, nome_idx
+                rows, i, header_map, nome_idx, mes, ano
             )
             if professional:
                 profissionais.append(professional)
@@ -381,7 +391,7 @@ def extrair_profissionais_melhorado(rows, header_map, nome_idx):
     
     return profissionais
 
-def process_professional_shifts_melhorado(rows, start_idx, header_map, nome_idx):
+def process_professional_shifts_melhorado(rows, start_idx, header_map, nome_idx, mes=None, ano=None):
     """Versão melhorada do processamento de plantões"""
     current_row = rows[start_idx]
     nome = clean_cell_value(current_row[nome_idx])
@@ -422,14 +432,17 @@ def process_professional_shifts_melhorado(rows, start_idx, header_map, nome_idx)
     
     # Converter plantões para formato final
     professional["plantoes"] = converter_plantoes_melhorado(
-        professional["plantoes_raw"]
+        professional["plantoes_raw"], mes, ano
     )
     del professional["plantoes_raw"]
     
     return professional, idx
 
-def converter_plantoes_melhorado(plantoes_raw):
+def converter_plantoes_melhorado(plantoes_raw, mes=None, ano=None):
     """Converte plantões raw para formato estruturado"""
+    if not mes or not ano:
+        mes, ano = 5, 2025  # Fallback
+        
     plantoes_final = []
     
     for dia, tokens in plantoes_raw.items():
@@ -439,8 +452,7 @@ def converter_plantoes_melhorado(plantoes_raw):
                 horarios = HORARIOS_TURNO.get(turno_info["turno"], {})
                 
                 try:
-                    # Assumir ano/mês global (será passado como parâmetro)
-                    data_plantao = datetime(2025, 5, dia)  # Temporário
+                    data_plantao = datetime(ano, mes, dia)
                     if turno_info["turno"] == "NOITE (fim)":
                         data_plantao += timedelta(days=1)
                     
@@ -552,45 +564,111 @@ def interpretar_turno(token):
 def processar_pagina_com_padrao(page_content, elementos, padrao_anterior=None):
     """Processa página usando detecção de padrões"""
     
-    # Verificar se é continuação
-    if detectar_continuacao(elementos) and padrao_anterior:
-        return padrao_anterior.extractor(
-            page_content["rows"], 
-            padrao_anterior.header_map, 
-            padrao_anterior.nome_idx
-        )
+    try:
+        # Verificar se é continuação
+        if detectar_continuacao(elementos) and padrao_anterior:
+            if hasattr(padrao_anterior, 'header_map') and hasattr(padrao_anterior, 'nome_idx'):
+                return padrao_anterior.extrator(
+                    page_content["rows"], 
+                    padrao_anterior.header_map, 
+                    padrao_anterior.nome_idx
+                )
+            else:
+                # Fallback se padrão anterior não tem dados suficientes
+                return extrair_profissionais_melhorado(
+                    page_content["rows"], {}, None
+                )
+        
+        # Calcular assinatura do padrão
+        assinatura = calcular_assinatura(elementos)
+        
+        # Verificar se padrão já é conhecido
+        if assinatura in PADROES_CONHECIDOS:
+            padrao = PADROES_CONHECIDOS[assinatura]
+        else:
+            # Criar novo padrão
+            padrao = EscalaPattern(
+                tipo=elementos['tipo_layout'],
+                assinatura=assinatura,
+                caracteristicas=elementos
+            )
+            PADROES_CONHECIDOS[assinatura] = padrao
+        
+        # Encontrar cabeçalho
+        header_map, nome_idx = None, None
+        for row in page_content["rows"]:
+            if is_header_row_melhorado(row):
+                header_map, nome_idx = build_header_map_melhorado(row)
+                break
+        
+        if not header_map or nome_idx is None:
+            # Tentar extração genérica se não encontrar cabeçalho
+            return extrair_sem_cabecalho(page_content["rows"])
+        
+        # Armazenar no padrão para páginas de continuação
+        padrao.header_map = header_map
+        padrao.nome_idx = nome_idx
+        
+        # Extrair profissionais usando o padrão
+        mes_global = elementos.get("mes_global", elementos.get("mes", 5))
+        ano_global = elementos.get("ano_global", elementos.get("ano", 2025))
+        
+        profissionais = padrao.extrator(page_content["rows"], header_map, nome_idx)
+        
+        return profissionais
+        
+    except Exception as e:
+        print(f"Erro no processamento de padrão: {e}")
+        # Fallback para extração básica
+        return extrair_profissionais_basico(page_content["rows"])
+
+def extrair_sem_cabecalho(rows):
+    """Extração para páginas sem cabeçalho identificável"""
+    profissionais = []
     
-    # Calcular assinatura do padrão
-    assinatura = calcular_assinatura(elementos)
+    for row in rows:
+        if row and len(row) > 0:
+            primeiro_campo = clean_cell_value(row[0])
+            if is_valid_professional_name_melhorado(primeiro_campo):
+                # Assumir estrutura básica: nome na primeira coluna
+                professional = {
+                    "medico_nome": primeiro_campo,
+                    "medico_crm": "N/I",
+                    "medico_especialidade": "N/I", 
+                    "medico_vinculo": "N/I",
+                    "plantoes": []
+                }
+                profissionais.append(professional)
     
-    # Verificar se padrão já é conhecido
-    if assinatura in PADROES_CONHECIDOS:
-        padrao = PADROES_CONHECIDOS[assinatura]
-    else:
-        # Criar novo padrão
-        padrao = EscalaPattern(
-            tipo=elementos['tipo_layout'],
-            assinatura=assinatura,
-            caracteristicas=elementos
-        )
-        PADROES_CONHECIDOS[assinatura] = padrao
+    return profissionais
+
+def extrair_profissionais_basico(rows):
+    """Extração básica como fallback"""
+    profissionais = []
     
-    # Encontrar cabeçalho
-    header_map, nome_idx = None, None
-    for row in page_content["rows"]:
-        if is_header_row_melhorado(row):
-            header_map, nome_idx = build_header_map_melhorado(row)
-            break
+    for i, row in enumerate(rows):
+        if not row:
+            continue
+            
+        # Tentar encontrar nomes em qualquer posição
+        for j, cell in enumerate(row):
+            if is_valid_professional_name_melhorado(cell):
+                professional = {
+                    "medico_nome": clean_cell_value(cell),
+                    "medico_crm": "N/I",
+                    "medico_especialidade": "N/I",
+                    "medico_vinculo": "N/I", 
+                    "plantoes": []
+                }
+                
+                # Tentar extrair outros campos da mesma linha
+                if j + 1 < len(row) and row[j + 1]:
+                    professional["medico_especialidade"] = clean_cell_value(row[j + 1])
+                
+                profissionais.append(professional)
+                break
     
-    if not header_map or nome_idx is None:
-        return []
-    
-    # Armazenar no padrão para páginas de continuação
-    padrao.header_map = header_map
-    padrao.nome_idx = nome_idx
-    
-    # Extrair profissionais usando o padrão
-    return padrao.extrator(page_content["rows"], header_map, nome_idx)
+    return profissionais
 
 # --- ENDPOINT PRINCIPAL MELHORADO ---
 
@@ -650,7 +728,10 @@ async def normaliza_escala_from_pdf_melhorado(request: Request):
         for page in pages_content:
             setor_a_usar = page["setor_pagina"] or global_setor or "NÃO INFORMADO"
             
-            # Processar página com detecção de padrões
+            # Processar página com detecção de padrões (passando mes e ano globais)
+            page["elementos"]["mes_global"] = global_mes
+            page["elementos"]["ano_global"] = global_ano
+            
             profissionais = processar_pagina_com_padrao(
                 page, 
                 page["elementos"], 
