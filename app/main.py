@@ -506,8 +506,3 @@ async def normaliza_escala_from_pdf(request: Request):
             content={"error": str(e), "trace": traceback.format_exc()},
             status_code=500
         )
-
-# --- Bloco de Execução ---
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
-# --- FIM normaliza-escala-HC ---
