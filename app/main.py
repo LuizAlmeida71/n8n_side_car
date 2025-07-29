@@ -91,6 +91,7 @@ async def split_pdf(file: UploadFile = File(...)):
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 # --- INÍCIO normaliza-escala-from-pdf ---
+
 MONTH_MAP = {m: i+1 for i, m in enumerate(['JANEIRO', 'FEVEREIRO', 'MARÇO', 'ABRIL', 'MAIO', 'JUNHO', 'JULHO', 'AGOSTO', 'SETEMBRO', 'OUTUBRO', 'NOVEMBRO', 'DEZEMBRO'])}
 
 HEADER_PATTERNS = {
@@ -120,7 +121,7 @@ def interpretar_turno(token):
 
 def normalizar_tabela(tabela):
     max_cols = max(len(row) for row in tabela)
-    return [row + [""]*(max_cols - len(row)) for row in tabela]
+    return [[str(cell or '') for cell in row] + [""]*(max_cols - len(row)) for row in tabela]
 
 def header_similarity(header_row, pattern):
     matches = sum(a.strip().upper() == b for a, b in zip(header_row, pattern))
@@ -165,7 +166,7 @@ async def normaliza_escala_from_pdf(request: Request):
                 if not tabelas: continue
                 tabela = normalizar_tabela(tabelas[0])
 
-                header_row = next((row for row in tabela if "NOME COMPLETO" in ''.join(row).upper()), None)
+                header_row = next((row for row in tabela if "NOME COMPLETO" in ''.join([str(cell or '') for cell in row]).upper()), None)
                 if header_row:
                     pattern_name = find_pattern(header_row) or f"novo_{len(HEADER_PATTERNS)+1}"
                     if pattern_name.startswith("novo"):
