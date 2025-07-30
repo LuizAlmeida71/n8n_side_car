@@ -57,21 +57,21 @@ async def convert_xlsx_to_json(file: UploadFile = File(...)):
 
 
 @app.post("/split-pdf")
-async def split_pdf(file: UploadFile = File(...)):
+async def split_pdf_base64(request: Request):
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-            contents = await file.read()
-            tmp.write(contents)
-            tmp_path = tmp.name
+        body = await request.json()
+        b64 = body.get("base64")
+        if not b64:
+            return JSONResponse(content={"error": "Campo 'base64' ausente"}, status_code=400)
 
-        doc = fitz.open(tmp_path)
+        pdf_bytes = base64.b64decode(b64)
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         pages_b64 = []
 
         for i in range(len(doc)):
             single_page = fitz.open()
             single_page.insert_pdf(doc, from_page=i, to_page=i)
 
-            # Corrigido: salvar com compactação e limpeza de objetos
             page_path = f"/tmp/page_{i+1}.pdf"
             single_page.save(page_path, garbage=4, deflate=True, incremental=False)
 
