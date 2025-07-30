@@ -292,8 +292,6 @@ MONTH_MAP = {
     'NOVEMBRO': 11, 'DEZEMBRO': 12
 }
 
-MONTH_MAP_REVERSE = {v: k for k, v in MONTH_MAP.items()}
-
 HORARIOS_TURNO = {
     "MANHÃ": {"inicio": "07:00", "fim": "13:00"},
     "TARDE": {"inicio": "13:00", "fim": "19:00"},
@@ -363,29 +361,19 @@ async def normaliza_escala_PACS(request: Request):
         last_unidade, last_setor = None, None
         last_mes, last_ano = None, None
 
-        # Debug: quantidade de páginas
-        print(f"DEBUG - Total de páginas recebidas: {len(body)}")
-
-        for page_num, page_data in enumerate(body):
+        for page_data in body:
             b64_data = page_data.get("base64") or page_data.get("bae64")
             if not b64_data:
                 continue
             pdf_bytes = base64.b64decode(b64_data)
             with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
-                page = doc[0]
-                page_text = page.get_text("text")
-                full_text += page_text + "\n"
-                
-                # Debug: conteúdo de cada página
-                print(f"DEBUG - Página {page_num + 1}: {len(page_text)} caracteres de texto")
-                
-                for table_num, table in enumerate(page.find_tables()):
-                    extracted = table.extract()
-                    if extracted:
-                        print(f"DEBUG - Página {page_num + 1}, Tabela {table_num + 1}: {len(extracted)} linhas")
-                        all_table_rows.extend(extracted)
-
-        print(f"DEBUG - Total de linhas de tabela extraídas: {len(all_table_rows)}")
+                for page in doc:
+                    page_text = page.get_text("text")
+                    full_text += page_text + "\n"
+                    for table in page.find_tables():
+                        extracted = table.extract()
+                        if extracted:
+                            all_table_rows.extend(extracted)
 
         unidade_match = re.search(r'UNIDADE:\s*(.*?)\n', full_text, re.IGNORECASE)
         setor_match = re.search(r'SETOR:\s*(.*?)\n', full_text, re.IGNORECASE)
@@ -397,8 +385,6 @@ async def normaliza_escala_PACS(request: Request):
 
         if last_mes is None or last_ano is None:
             return JSONResponse(content={"error": "Mês/Ano não encontrados."}, status_code=400)
-
-        print(f"DEBUG - Processando escala de {MONTH_MAP_REVERSE.get(last_mes, 'MÊS DESCONHECIDO')}/{last_ano}")
 
         profissionais_data = defaultdict(lambda: {"info_rows": []})
         header_map = None
@@ -412,17 +398,14 @@ async def normaliza_escala_PACS(request: Request):
                 idx_linha += 1
                 continue
 
-            # Detecta linha de cabeçalho
             if any("NOME" in str(cell).upper() and "COMPLETO" in str(cell).upper() for cell in row):
                 first_col_is_index = str(row[0]).strip().isdigit()
                 start_offset = 1 if first_col_is_index else 0
                 header_row = row[start_offset:]
                 header_map = {}
-                
                 for i, col_name in enumerate(header_row):
                     clean_name = str(col_name).replace('\n', ' ').strip().upper()
                     col_pos = i + start_offset
-                    
                     if "NOME COMPLETO" in clean_name:
                         header_map["NOME COMPLETO"] = col_pos
                     elif "CARGO" in clean_name:
@@ -432,21 +415,12 @@ async def normaliza_escala_PACS(request: Request):
                     elif "CONSELHO" in clean_name or "CRM" in clean_name:
                         header_map["CRM"] = col_pos
                     else:
-                        # Tenta extrair dias do mês
-                        col_text = str(col_name).strip()
-                        # Verifica se começa com número (dia)
-                        first_line = col_text.split('\n')[0] if '\n' in col_text else col_text
-                        if first_line.isdigit():
-                            dia_col = int(first_line)
+                        try:
+                            dia_col = int(str(col_name).strip().split("\n")[0])
                             header_map[dia_col] = col_pos
-                
+                        except:
+                            pass
                 nome_idx = header_map.get("NOME COMPLETO")
-                
-                # Debug: mostra o header map criado
-                dias_encontrados = sorted([k for k in header_map.keys() if isinstance(k, int)])
-                print(f"DEBUG - Header map criado. Dias encontrados: {dias_encontrados}")
-                print(f"DEBUG - Header map completo: {header_map}")
-                
                 last_name = None
                 idx_linha += 1
                 continue
@@ -455,12 +429,10 @@ async def normaliza_escala_PACS(request: Request):
                 idx_linha += 1
                 continue
 
-            # Processa linha de dados
             nome_bruto = row[nome_idx] if nome_idx < len(row) else None
             if nome_bruto and is_valid_professional_name(nome_bruto):
                 last_name = nome_bruto.replace('\n', ' ').strip()
             elif nome_bruto and last_name and len(nome_bruto.strip().split()) == 1:
-                # Continua nome da linha anterior
                 last_name = f"{last_name} {nome_bruto.strip()}"
 
             if last_name:
@@ -471,9 +443,7 @@ async def normaliza_escala_PACS(request: Request):
 
             idx_linha += 1
 
-        # Processa os profissionais encontrados
         lista_profissionais_final = []
-        
         for nome, data in profissionais_data.items():
             info_rows = data["info_rows"]
             if not info_rows:
@@ -489,54 +459,38 @@ async def normaliza_escala_PACS(request: Request):
 
             profissional_obj = {
                 "medico_nome": nome.replace('\n', ' ').strip(),
-                "medico_crm": get_cell_value("CRM").replace('\n', ' ').strip(),
-                "medico_especialidade": get_cell_value("CARGO").replace('\n', ' ').strip(),
-                "medico_vinculo": get_cell_value("VÍNCULO").replace('\n', ' ').strip(),
+                "medico_crm": get_cell_value("CRM"),
+                "medico_especialidade": get_cell_value("CARGO"),
+                "medico_vinculo": get_cell_value("VÍNCULO"),
                 "medico_setor": last_setor.replace('\n', ' ').strip(),
                 "medico_unidade": last_unidade.replace('\n', ' ').strip(),
                 "plantoes": []
             }
 
-            # Filtra apenas profissionais PAES
             if "PAES" not in profissional_obj["medico_vinculo"].upper():
                 continue
 
-            # Coleta todos os plantões
             plantoes_brutos = defaultdict(list)
             for row in info_rows:
                 for dia, col_idx in header_map.items():
-                    if isinstance(dia, int) and col_idx < len(row) and row[col_idx]:
-                        valor_celula = str(row[col_idx]).strip()
-                        if valor_celula and valor_celula not in ['-', '']:
-                            plantoes_brutos[dia].append(valor_celula)
+                    if isinstance(dia, int) and col_idx < len(row):
+                        valor = row[col_idx]
+                        if valor is not None and str(valor).strip():
+                            plantoes_brutos[dia].append(str(valor).strip())
 
-            # Debug: plantões encontrados
-            if plantoes_brutos:
-                dias_com_plantao = sorted(plantoes_brutos.keys())
-                print(f"DEBUG - {nome}: dias com plantão = {dias_com_plantao}")
-                print(f"DEBUG - Plantões brutos: {dict(plantoes_brutos)}")
-
-            # Processa os plantões
             for dia, tokens in sorted(plantoes_brutos.items()):
                 for token in tokens:
                     turnos = interpretar_turno(token, last_setor)
-                    
                     try:
-                        # Cria a data do plantão
                         data_plantao = datetime(last_ano, last_mes, dia)
-                    except ValueError as e:
-                        print(f"DEBUG - Erro ao criar data {dia}/{last_mes}/{last_ano}: {e}")
+                    except:
                         continue
-                    
                     for turno_info in turnos:
                         horarios = HORARIOS_TURNO.get(turno_info["turno"], {})
                         data_inicio = data_plantao
-                        
-                        # Para NOITE (fim), adiciona um dia
-                        # timedelta cuida automaticamente da virada de mês
                         if turno_info["turno"] == "NOITE (fim)":
                             data_inicio += timedelta(days=1)
-                        
+                        data_hora_ordenacao = datetime.strptime(f"{data_inicio.strftime('%Y-%m-%d')} {horarios.get('inicio', '00:00')}", "%Y-%m-%d %H:%M")
                         profissional_obj["plantoes"].append({
                             "data": data_inicio.strftime('%d/%m/%Y'),
                             "dia": data_inicio.day,
@@ -544,13 +498,9 @@ async def normaliza_escala_PACS(request: Request):
                             "setor": last_setor,
                             "inicio": horarios.get("inicio"),
                             "fim": horarios.get("fim"),
-                            "ordenacao": datetime.strptime(
-                                f"{data_inicio.strftime('%Y-%m-%d')} {horarios.get('inicio', '00:00')}", 
-                                "%Y-%m-%d %H:%M"
-                            )
+                            "ordenacao": data_hora_ordenacao
                         })
 
-            # Remove duplicatas e ordena
             profissional_obj["plantoes"] = dedup_plantao(profissional_obj["plantoes"])
             if profissional_obj["plantoes"]:
                 profissional_obj["plantoes"].sort(key=lambda p: p["ordenacao"])
@@ -558,21 +508,16 @@ async def normaliza_escala_PACS(request: Request):
                     p.pop("ordenacao", None)
                 lista_profissionais_final.append(profissional_obj)
 
-        # Monta resposta final
-        mes_nome_str = MONTH_MAP_REVERSE.get(last_mes, "MÊS DESCONHECIDO")
+        mes_nome_str = list(MONTH_MAP.keys())[list(MONTH_MAP.values()).index(last_mes)]
         final_output = [{
             "unidade_escala": last_unidade,
             "mes_ano_escala": f"{mes_nome_str}/{last_ano}",
             "profissionais": lista_profissionais_final
         }]
 
-        print(f"DEBUG - Total de profissionais processados: {len(lista_profissionais_final)}")
-        
         return JSONResponse(content=final_output)
 
     except Exception as e:
-        print(f"ERRO: {str(e)}")
-        print(f"TRACEBACK: {traceback.format_exc()}")
         return JSONResponse(
             content={"error": str(e), "trace": traceback.format_exc()},
             status_code=500
