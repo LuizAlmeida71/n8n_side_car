@@ -287,91 +287,6 @@ async def text_to_pdf(request: Request):
 
 
 # --- INICIO normaliza-escala-PACS ---
-# --- Constantes e Mapas ---
-MONTH_MAP = {
-    'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
-    'JUNHO': 6, 'JULHO': 7, 'AGOSTO': 8, 'SETEMBRO': 9, 'OUTUBRO': 10,
-    'NOVEMBRO': 11, 'DEZEMBRO': 12
-}
-
-HORARIOS_TURNO = {
-    "MANHÃ": {"inicio": "07:00", "fim": "13:00"},
-    "TARDE": {"inicio": "13:00", "fim": "19:00"},
-    "NOITE (início)": {"inicio": "19:00", "fim": "01:00"},
-    "NOITE (fim)": {"inicio": "01:00", "fim": "07:00"},
-}
-
-# --- Funções Auxiliares ---
-
-def parse_mes_ano(text: str):
-    """
-    Função aprimorada para extrair mês e ano do texto.
-    É mais flexível e busca por nomes de meses próximos a um ano de 4 dígitos.
-    """
-    month_regex = '|'.join(MONTH_MAP.keys())
-    # Procura padrões como "MÊS DE JANEIRO/2024", "JANEIRO / 2024" ou "JANEIRO DE 2024"
-    match = re.search(
-        r'(?:MÊS\s*(?:DE)?\s*)?(' + month_regex + r')\s*(?:DE\s*|[/|-]?)\s*(\d{4})',
-        text.upper(),
-        re.IGNORECASE
-    )
-    if not match:
-        return None, None
-
-    mes_nome, ano_str = match.groups()
-    mes = MONTH_MAP.get(mes_nome.upper())
-    ano = int(ano_str)
-    return mes, ano
-
-def interpretar_turno(token: str, medico_setor: str):
-    if not token or not isinstance(token, str):
-        return []
-
-    # Limpeza inicial do token
-    token_clean = token.replace('\n', '').replace('/', '').replace(' ', '')
-    tokens = list(token_clean)
-    turnos_finais = []
-
-    for t in tokens:
-        if t == 'M':
-            turnos_finais.append({"turno": "MANHÃ"})
-        elif t == 'T':
-            turnos_finais.append({"turno": "TARDE"})
-        elif t == 'D':
-            turnos_finais.append({"turno": "MANHÃ"})
-            turnos_finais.append({"turno": "TARDE"})
-        elif t == 'N':  # 'N' maiúsculo representa um plantão noturno completo
-            turnos_finais.append({"turno": "NOITE (início)"})
-            turnos_finais.append({"turno": "NOITE (fim)"})
-        elif t == 'n':  # 'n' minúsculo representa apenas o início da noite
-            turnos_finais.append({"turno": "NOITE (início)"})
-
-    return turnos_finais
-
-def is_valid_professional_name(name: str):
-    if not name or not isinstance(name, str):
-        return False
-    name_upper = name.strip().upper()
-    ignored_keywords = ["NOME COMPLETO", "LEGENDA", "ASSINATURA", "ASSINADO", "COMPLETO", "CARGO", "MATRÍCULA"]
-    if any(keyword in name_upper for keyword in ignored_keywords):
-        return False
-    # Considera válido se tiver 2 ou mais nomes ou se for tudo maiúsculo (siglas ou nomes únicos)
-    return len(name.split()) >= 2 or name.isupper()
-
-def dedup_plantao(lista_plantoes: list):
-    seen = set()
-    result = []
-    for p in lista_plantoes:
-        # A chave de identificação única para um plantão
-        key = (p["dia"], p["turno"], p["inicio"], p["fim"])
-        if key not in seen:
-            seen.add(key)
-            result.append(p)
-    return result
-
-# --- Endpoint da API ---
-
-# CORREÇÃO: O path e o nome da função devem ser consistentes e válidos.
 @app.post("/normaliza-escala-PACS")
 async def normaliza_escala_PACS(request: Request):
     try:
@@ -393,13 +308,12 @@ async def normaliza_escala_PACS(request: Request):
                 page_text = page.get_text("text")
                 full_text += page_text + "\n"
                 
-                # Extrai tabelas da página
                 for table in page.find_tables():
                     extracted = table.extract()
                     if extracted:
                         all_table_rows.extend(extracted)
         
-        # 2. EXTRAÇÃO DE METADADOS GLOBAIS (Unidade, Setor, Mês/Ano)
+        # 2. METADADOS
         unidade_match = re.search(r'UNIDADE:\s*(.*?)\n', full_text, re.IGNORECASE)
         setor_match = re.search(r'SETOR:\s*(.*?)\n', full_text, re.IGNORECASE)
         mes, ano = parse_mes_ano(full_text)
@@ -411,7 +325,7 @@ async def normaliza_escala_PACS(request: Request):
         if last_mes is None or last_ano is None:
             return JSONResponse(content={"error": "Mês/Ano não encontrados."}, status_code=400)
 
-        # 3. PROCESSAMENTO DAS LINHAS DA TABELA
+        # 3. PROCESSAMENTO TABELA
         profissionais_data = defaultdict(lambda: {"info_rows": []})
         header_map = None
         nome_idx = None
@@ -424,7 +338,6 @@ async def normaliza_escala_PACS(request: Request):
                 idx_linha += 1
                 continue
 
-            # Detecta uma linha de cabeçalho
             if any("NOME" in str(cell).upper() and "COMPLETO" in str(cell).upper() for cell in row):
                 first_col_is_index = str(row[0]).strip().isdigit()
                 start_offset = 1 if first_col_is_index else 0
@@ -447,7 +360,7 @@ async def normaliza_escala_PACS(request: Request):
                         header_map[int(col_name)] = col_pos
                 
                 nome_idx = header_map.get("NOME COMPLETO")
-                last_name = None  # Reseta o último nome ao encontrar um novo cabeçalho
+                last_name = None
                 idx_linha += 1
                 continue
 
@@ -455,12 +368,10 @@ async def normaliza_escala_PACS(request: Request):
                 idx_linha += 1
                 continue
 
-            # Lógica para juntar nomes que se quebram em várias linhas
             nome_bruto = row[nome_idx] if nome_idx < len(row) else None
             if nome_bruto and is_valid_professional_name(nome_bruto):
                 last_name = nome_bruto.replace('\n', ' ').strip()
             elif nome_bruto and last_name and len(nome_bruto.strip().split()) == 1:
-                # Se a célula atual tem apenas uma palavra, assume-se que é continuação do nome anterior
                 last_name = f"{last_name} {nome_bruto.strip()}"
             
             if last_name:
@@ -471,28 +382,32 @@ async def normaliza_escala_PACS(request: Request):
 
             idx_linha += 1
 
-        # 4. MONTAGEM DO OBJETO DE RESPOSTA
+        # 4. CONSTRUÇÃO DA SAÍDA FINAL
         lista_profissionais_final = []
+
         for nome, data in profissionais_data.items():
             info_rows = data["info_rows"]
             if not info_rows:
                 continue
 
             primeira_linha = info_rows[0]
-            
-            # Função auxiliar para obter valor da célula com segurança
             def get_cell_value(col_name, default="N/I"):
                 idx = header_map.get(col_name)
                 if idx is not None and idx < len(primeira_linha) and primeira_linha[idx]:
                     return str(primeira_linha[idx]).strip()
                 return default
 
+            vinculo = get_cell_value("VÍNCULO")
+            if "PAES" not in vinculo.upper():
+                continue
+
             profissional_obj = {
                 "medico_nome": nome,
                 "medico_crm": get_cell_value("CRM"),
                 "medico_especialidade": get_cell_value("CARGO"),
-                "medico_vinculo": get_cell_value("VÍNCULO"),
+                "medico_vinculo": vinculo,
                 "medico_setor": last_setor,
+                "medico_unidade": last_unidade,
                 "plantoes": []
             }
 
@@ -510,26 +425,23 @@ async def normaliza_escala_PACS(request: Request):
                         horarios = HORARIOS_TURNO.get(turno_info["turno"], {})
                         
                         data_inicio_plantao = data_plantao
-                        data_fim_plantao = data_plantao
-                        
                         if turno_info["turno"] == "NOITE (fim)":
-                            # O fim do plantão noturno ocorre no dia seguinte
                             data_inicio_plantao += timedelta(days=1)
-                            data_fim_plantao += timedelta(days=1)
 
                         profissional_obj["plantoes"].append({
                             "dia": data_inicio_plantao.day,
                             "data": data_inicio_plantao.strftime('%d/%m/%Y'),
                             "turno": turno_info["turno"],
                             "inicio": horarios.get("inicio"),
-                            "fim": horarios.get("fim")
+                            "fim": horarios.get("fim"),
+                            "setor": last_setor
                         })
-            
+
             profissional_obj["plantoes"] = dedup_plantao(profissional_obj["plantoes"])
             if profissional_obj["plantoes"]:
                 profissional_obj["plantoes"].sort(key=lambda p: (p["dia"], p["inicio"] or ""))
                 lista_profissionais_final.append(profissional_obj)
-        
+
         mes_nome_str = list(MONTH_MAP.keys())[list(MONTH_MAP.values()).index(last_mes)]
         final_output = [{
             "unidade_escala": last_unidade,
@@ -544,4 +456,5 @@ async def normaliza_escala_PACS(request: Request):
             content={"error": str(e), "trace": traceback.format_exc()},
             status_code=500
         )
+
 # --- FIM normaliza-escala-PACS ---
