@@ -348,7 +348,7 @@ def dedup_plantao(lista_plantoes: list):
     seen = set()
     result = []
     for p in lista_plantoes:
-        key = (p["dia"], p["turno"], p["inicio"], p["fim"])
+        key = (p["data"], p["turno"], p["inicio"], p["fim"])
         if key not in seen:
             seen.add(key)
             result.append(p)
@@ -416,14 +416,9 @@ async def normaliza_escala_PACS(request: Request):
                         header_map["VÍNCULO"] = col_pos
                     elif "CONSELHO" in clean_name or "CRM" in clean_name:
                         header_map["CRM"] = col_pos
-                    else:
-                        try:
-                            valor = str(col_name).strip().split("\n")[0]
-                            if valor.isdigit():
-                                dia_col = int(valor)
-                                header_map[dia_col] = col_pos
-                        except Exception:
-                            continue
+                    elif str(col_name).strip().split("\n")[0].isdigit():
+                        dia_col = int(str(col_name).strip().split("\n")[0])
+                        header_map[dia_col] = col_pos
                 nome_idx = header_map.get("NOME COMPLETO")
                 last_name = None
                 idx_linha += 1
@@ -495,12 +490,15 @@ async def normaliza_escala_PACS(request: Request):
                             "turno": turno_info["turno"],
                             "setor": last_setor,
                             "inicio": horarios.get("inicio"),
-                            "fim": horarios.get("fim")
+                            "fim": horarios.get("fim"),
+                            "ordenacao": datetime.strptime(f"{data_inicio.strftime('%Y-%m-%d')} {horarios.get('inicio', '00:00')}", "%Y-%m-%d %H:%M")
                         })
 
             profissional_obj["plantoes"] = dedup_plantao(profissional_obj["plantoes"])
             if profissional_obj["plantoes"]:
-                profissional_obj["plantoes"].sort(key=lambda p: (p["dia"], p["inicio"] or ""))
+                profissional_obj["plantoes"].sort(key=lambda p: p["ordenacao"])
+                for p in profissional_obj["plantoes"]:
+                    p.pop("ordenacao", None)
                 lista_profissionais_final.append(profissional_obj)
 
         mes_nome_str = list(MONTH_MAP.keys())[list(MONTH_MAP.values()).index(last_mes)]
