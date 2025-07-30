@@ -57,27 +57,49 @@ async def convert_xlsx_to_json(file: UploadFile = File(...)):
 
 
 @app.post("/split-pdf")
-async def split_pdf(
-    request: Request,
-    file: Optional[UploadFile] = File(None)  # Pode ser None se vier JSON
-):
+async def split_pdf(file: UploadFile = File(...)):
     try:
-        # Detecta se é JSON com base64
-        if request.headers.get("content-type", "").startswith("application/json"):
-            body = await request.json()
-            b64_data = body.get("base64")
-            if not b64_data:
-                return JSONResponse(content={"error": "Campo 'base64' ausente"}, status_code=400)
-            pdf_bytes = base64.b64decode(b64_data)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            contents = await file.read()
+            tmp.write(contents)
+            tmp_path = tmp.name
 
-        # Ou se veio como multipart com arquivo binário
-        elif file is not None:
-            pdf_bytes = await file.read()
+        doc = fitz.open(tmp_path)
+        pages_b64 = []
 
-        else:
-            return JSONResponse(content={"error": "Nenhum PDF enviado."}, status_code=400)
+        for i in range(len(doc)):
+            single_page = fitz.open()
+            single_page.insert_pdf(doc, from_page=i, to_page=i)
 
-        # Processa o PDF normalmente
+            # Corrigido: salvar com compactação e limpeza de objetos
+            page_path = f"/tmp/page_{i+1}.pdf"
+            single_page.save(page_path, garbage=4, deflate=True, incremental=False)
+
+            with open(page_path, "rb") as f:
+                b64_content = base64.b64encode(f.read()).decode("utf-8")
+                pages_b64.append({
+                    "page": i + 1,
+                    "file_base64": b64_content,
+                    "filename": f"page_{i+1}.pdf"
+                })
+
+            os.remove(page_path)
+
+        return JSONResponse(content={"pages": pages_b64})
+
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.post("/split-pdf-base64")
+async def split_pdf_base64(request: Request):
+    try:
+        body = await request.json()
+        b64 = body.get("base64")
+        if not b64:
+            return JSONResponse(content={"error": "Campo 'base64' ausente"}, status_code=400)
+
+        pdf_bytes = base64.b64decode(b64)
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         pages_b64 = []
 
@@ -102,6 +124,8 @@ async def split_pdf(
 
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
 
 
 # --- INÍCIO normaliza-escala-from-pdf ---
