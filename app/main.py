@@ -92,7 +92,7 @@ async def split_pdf(file: UploadFile = File(...)):
 
 
 @app.post("/split-pdf-base64")
-async def split_pdf_base64(request: Request):
+async def split-pdf-base64(request: Request):
     try:
         body = await request.json()
         b64 = body.get("base64")
