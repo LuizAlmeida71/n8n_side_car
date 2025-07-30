@@ -92,7 +92,7 @@ async def split_pdf(file: UploadFile = File(...)):
 
 
 @app.post("/split-pdf-base64")
-async def split-pdf-base64(request: Request):
+async def split_pdf_base64(request: Request):
     try:
         body = await request.json()
         b64 = body.get("base64")
@@ -373,7 +373,7 @@ def dedup_plantao(lista_plantoes: list):
 
 # CORREÇÃO: O path e o nome da função devem ser consistentes e válidos.
 @app.post("/normaliza-escala-PACS")
-async def normaliza-escala-PACS(request: Request):
+async def normaliza_escala_PACS(request: Request):
     try:
         body = await request.json()
         full_text = ""
