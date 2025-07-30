@@ -416,8 +416,9 @@ async def normaliza_escala_PACS(request: Request):
                         header_map["VÍNCULO"] = col_pos
                     elif "CONSELHO" in clean_name or "CRM" in clean_name:
                         header_map["CRM"] = col_pos
-                    elif str(col_name).isdigit():
-                        header_map[int(col_name)] = col_pos
+                    elif str(col_name).strip().split("\n")[0].isdigit():
+                        dia_col = int(str(col_name).strip().split("\n")[0])
+                        header_map[dia_col] = col_pos
                 nome_idx = header_map.get("NOME COMPLETO")
                 last_name = None
                 idx_linha += 1
