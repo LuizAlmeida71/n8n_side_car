@@ -248,7 +248,7 @@ async def text_to_pdf(request: Request):
 
 
 
-# --- INICIO normaliza-escala-HC ---
+# --- INICIO normaliza-escala-PACS ---
 # --- Constantes e Mapas ---
 MONTH_MAP = {
     'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
@@ -334,8 +334,8 @@ def dedup_plantao(lista_plantoes: list):
 # --- Endpoint da API ---
 
 # CORREÇÃO: O path e o nome da função devem ser consistentes e válidos.
-@app.post("/normaliza-escala-from-pdf")
-async def normaliza_escala_from_pdf(request: Request):
+@app.post("/normaliza-escala-PACS")
+async def normaliza-escala-PACS(request: Request):
     try:
         body = await request.json()
         full_text = ""
@@ -345,7 +345,7 @@ async def normaliza_escala_from_pdf(request: Request):
 
         # 1. EXTRAÇÃO DE DADOS DE TODAS AS PÁGINAS DO PDF
         for page_data in body:
-            b64_data = page_data.get("bae64")
+            b64_data = page_data.get("base64") or page_data.get("bae64")
             if not b64_data:
                 continue
             
@@ -506,3 +506,4 @@ async def normaliza_escala_from_pdf(request: Request):
             content={"error": str(e), "trace": traceback.format_exc()},
             status_code=500
         )
+# --- FIM normaliza-escala-PACS ---
