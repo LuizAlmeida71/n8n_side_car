@@ -416,9 +416,14 @@ async def normaliza_escala_PACS(request: Request):
                         header_map["VÍNCULO"] = col_pos
                     elif "CONSELHO" in clean_name or "CRM" in clean_name:
                         header_map["CRM"] = col_pos
-                    elif str(col_name).strip().split("\n")[0].isdigit():
-                        dia_col = int(str(col_name).strip().split("\n")[0])
-                        header_map[dia_col] = col_pos
+                    else:
+                        try:
+                            valor = str(col_name).strip().split("\n")[0]
+                            if valor.isdigit():
+                                dia_col = int(valor)
+                                header_map[dia_col] = col_pos
+                        except Exception:
+                            continue
                 nome_idx = header_map.get("NOME COMPLETO")
                 last_name = None
                 idx_linha += 1
@@ -466,8 +471,6 @@ async def normaliza_escala_PACS(request: Request):
                 "plantoes": []
             }
 
-
-            # 🔎 Aplica o filtro do PAES
             if "PAES" not in profissional_obj["medico_vinculo"].upper():
                 continue
 
