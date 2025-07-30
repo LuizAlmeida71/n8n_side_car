@@ -456,14 +456,15 @@ async def normaliza_escala_PACS(request: Request):
                 return default
 
             profissional_obj = {
-                "medico_nome": nome,
-                "medico_crm": get_cell_value("CRM"),
-                "medico_especialidade": get_cell_value("CARGO"),
-                "medico_vinculo": get_cell_value("VÍNCULO"),
-                "medico_setor": last_setor,
-                "medico_unidade": last_unidade,
+                "medico_nome": nome.replace('\n', ' ').strip(),
+                "medico_crm": get_cell_value("CRM").replace('\n', ' ').strip(),
+                "medico_especialidade": get_cell_value("CARGO").replace('\n', ' ').strip(),
+                "medico_vinculo": get_cell_value("VÍNCULO").replace('\n', ' ').strip(),
+                "medico_setor": last_setor.replace('\n', ' ').strip(),
+                "medico_unidade": last_unidade.replace('\n', ' ').strip(),
                 "plantoes": []
             }
+
 
             # 🔎 Aplica o filtro do PAES
             if "PAES" not in profissional_obj["medico_vinculo"].upper():
