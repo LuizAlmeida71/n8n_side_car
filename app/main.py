@@ -57,14 +57,27 @@ async def convert_xlsx_to_json(file: UploadFile = File(...)):
 
 
 @app.post("/split-pdf")
-async def split_pdf_base64(request: Request):
+async def split_pdf(
+    request: Request,
+    file: Optional[UploadFile] = File(None)  # Pode ser None se vier JSON
+):
     try:
-        body = await request.json()
-        b64 = body.get("base64")
-        if not b64:
-            return JSONResponse(content={"error": "Campo 'base64' ausente"}, status_code=400)
+        # Detecta se é JSON com base64
+        if request.headers.get("content-type", "").startswith("application/json"):
+            body = await request.json()
+            b64_data = body.get("base64")
+            if not b64_data:
+                return JSONResponse(content={"error": "Campo 'base64' ausente"}, status_code=400)
+            pdf_bytes = base64.b64decode(b64_data)
 
-        pdf_bytes = base64.b64decode(b64)
+        # Ou se veio como multipart com arquivo binário
+        elif file is not None:
+            pdf_bytes = await file.read()
+
+        else:
+            return JSONResponse(content={"error": "Nenhum PDF enviado."}, status_code=400)
+
+        # Processa o PDF normalmente
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         pages_b64 = []
 
@@ -89,6 +102,7 @@ async def split_pdf_base64(request: Request):
 
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
+
 
 # --- INÍCIO normaliza-escala-from-pdf ---
 MONTH_MAP = {m: i+1 for i, m in enumerate(['JANEIRO', 'FEVEREIRO', 'MARÇO', 'ABRIL', 'MAIO', 'JUNHO', 'JULHO', 'AGOSTO', 'SETEMBRO', 'OUTUBRO', 'NOVEMBRO', 'DEZEMBRO'])}
