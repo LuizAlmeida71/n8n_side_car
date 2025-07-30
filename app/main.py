@@ -284,17 +284,6 @@ async def text_to_pdf(request: Request):
 
 
 
-
-
-import re
-import base64
-import fitz
-import traceback
-from datetime import datetime, timedelta
-from collections import defaultdict
-from fastapi import Request
-from fastapi.responses import JSONResponse
-
 # --- INICIO normaliza-escala-PACS ---
 
 MONTH_MAP = {
@@ -302,6 +291,8 @@ MONTH_MAP = {
     'JUNHO': 6, 'JULHO': 7, 'AGOSTO': 8, 'SETEMBRO': 9, 'OUTUBRO': 10,
     'NOVEMBRO': 11, 'DEZEMBRO': 12
 }
+
+MONTH_MAP_REVERSE = {v: k for k, v in MONTH_MAP.items()}
 
 HORARIOS_TURNO = {
     "MANHÃ": {"inicio": "07:00", "fim": "13:00"},
@@ -407,7 +398,7 @@ async def normaliza_escala_PACS(request: Request):
         if last_mes is None or last_ano is None:
             return JSONResponse(content={"error": "Mês/Ano não encontrados."}, status_code=400)
 
-        print(f"DEBUG - Processando escala de {MONTH_MAP_REVERSE[last_mes]}/{last_ano}")
+        print(f"DEBUG - Processando escala de {MONTH_MAP_REVERSE.get(last_mes, 'MÊS DESCONHECIDO')}/{last_ano}")
 
         profissionais_data = defaultdict(lambda: {"info_rows": []})
         header_map = None
@@ -482,7 +473,6 @@ async def normaliza_escala_PACS(request: Request):
 
         # Processa os profissionais encontrados
         lista_profissionais_final = []
-        MONTH_MAP_REVERSE = {v: k for k, v in MONTH_MAP.items()}
         
         for nome, data in profissionais_data.items():
             info_rows = data["info_rows"]
@@ -569,7 +559,7 @@ async def normaliza_escala_PACS(request: Request):
                 lista_profissionais_final.append(profissional_obj)
 
         # Monta resposta final
-        mes_nome_str = MONTH_MAP_REVERSE[last_mes]
+        mes_nome_str = MONTH_MAP_REVERSE.get(last_mes, "MÊS DESCONHECIDO")
         final_output = [{
             "unidade_escala": last_unidade,
             "mes_ano_escala": f"{mes_nome_str}/{last_ano}",
