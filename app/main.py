@@ -289,6 +289,7 @@ async def text_to_pdf(request: Request):
 
 
 # --- INICIO normaliza-escala-PACS ---
+
 MONTH_MAP = {
     'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
     'JUNHO': 6, 'JULHO': 7, 'AGOSTO': 8, 'SETEMBRO': 9, 'OUTUBRO': 10,
@@ -309,14 +310,16 @@ def parse_mes_ano(text: str):
         text.upper(),
         re.IGNORECASE
     )
-    if not match: return None, None
+    if not match:
+        return None, None
     mes_nome, ano_str = match.groups()
     mes = MONTH_MAP.get(mes_nome.upper())
     ano = int(ano_str)
     return mes, ano
 
 def interpretar_turno(token: str, medico_setor: str):
-    if not token or not isinstance(token, str): return []
+    if not token or not isinstance(token, str):
+        return []
     token_clean = token.replace('\n', '').replace('/', '').replace(' ', '')
     tokens = list(token_clean)
     turnos_finais = []
@@ -339,17 +342,51 @@ def is_valid_professional_name(name: str):
     return not any(keyword in name_upper for keyword in ignored_keywords) and \
            (len(name.split()) >= 2 or name.isupper())
 
-# --- CORREÇÃO DO ERRO NameError ---
 def dedup_plantao(lista_plantoes: list):
     seen = set()
-    result = []  # Inicializa a lista de resultados
+    result = []
     for p in lista_plantoes:
-        key = (p["dia"], p["turno"], p["inicio"], p["fim"])
+        key = (p["data"], p["turno"], p["inicio"], p["fim"])
         if key not in seen:
             seen.add(key)
             result.append(p)
     return result
-# --- FIM DA CORREÇÃO ---
+
+@app.post("/split-pdf")
+async def split_pdf(file: UploadFile = File(...)):
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            contents = await file.read()
+            tmp.write(contents)
+            tmp_path = tmp.name
+
+        pages_b64 = []
+
+        with fitz.open(tmp_path) as doc:
+            for i in range(len(doc)):
+                single_page = fitz.open()
+                single_page.insert_pdf(doc, from_page=i, to_page=i)
+
+                page_path = f"/tmp/page_{i+1}.pdf"
+                single_page.save(page_path, garbage=4, deflate=True, incremental=False)
+
+                with open(page_path, "rb") as f:
+                    b64_content = base64.b64encode(f.read()).decode("utf-8")
+                    pages_b64.append({
+                        "page": i + 1,
+                        "file_base64": b64_content,
+                        "filename": f"page_{i+1}.pdf"
+                    })
+
+                os.remove(page_path)
+
+        os.remove(tmp_path)
+        return JSONResponse(content={"pages": pages_b64})
+
+    except Exception as e:
+        if 'tmp_path' in locals() and os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        return JSONResponse(content={"error": str(e)}, status_code=500)
 
 @app.post("/normaliza-escala-PACS")
 async def normaliza_escala_PACS(request: Request):
@@ -362,17 +399,18 @@ async def normaliza_escala_PACS(request: Request):
 
         for page_data in body:
             b64_data = page_data.get("base64") or page_data.get("bae64")
-            if not b64_data: continue
+            if not b64_data:
+                continue
             pdf_bytes = base64.b64decode(b64_data)
             with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
                 page = doc[0]
                 page_text = page.get_text("text")
-                if not full_text: 
+                if not full_text:
                     full_text = page_text
-                
                 for table in page.find_tables():
                     extracted = table.extract()
-                    if extracted: all_table_rows.extend(extracted)
+                    if extracted:
+                        all_table_rows.extend(extracted)
 
         unidade_match = re.search(r'UNIDADE:\s*(.*?)\n', full_text, re.IGNORECASE)
         setor_match = re.search(r'SETOR:\s*(.*?)\n', full_text, re.IGNORECASE)
@@ -403,23 +441,19 @@ async def normaliza_escala_PACS(request: Request):
                 header_row = row[start_offset:]
                 header_map = {}
                 for i, col_name in enumerate(header_row):
-                    col_pos = i + start_offset
-                    
-                    # --- INÍCIO DA CORREÇÃO DEFINITIVA PARA O DIA 31 ---
-                    # Isola a primeira linha do conteúdo da célula, limpa e verifica se é um número.
-                    first_line = str(col_name or '').split('\n')[0].strip()
-                    if first_line.isdigit():
-                        day_number = int(first_line)
-                        if 1 <= day_number <= 31:
-                            header_map[day_number] = col_pos
-                            continue # Pula para o próximo item, evitando elifs
-                    # --- FIM DA CORREÇÃO DEFINITIVA PARA O DIA 31 ---
-                    
                     clean_name_upper = str(col_name or '').replace('\n', ' ').strip().upper()
+                    col_pos = i + start_offset
+
                     if "NOME COMPLETO" in clean_name_upper: header_map["NOME COMPLETO"] = col_pos
                     elif "CARGO" in clean_name_upper: header_map["CARGO"] = col_pos
                     elif "VÍNCULO" in clean_name_upper or "VINCULO" in clean_name_upper: header_map["VÍNCULO"] = col_pos
                     elif "CONSELHO" in clean_name_upper or "CRM" in clean_name_upper: header_map["CRM"] = col_pos
+                    else:
+                        day_match = re.match(r'^\s*(\d{1,2})', str(col_name or ''))
+                        if day_match:
+                            day_number = int(day_match.group(1))
+                            if 1 <= day_number <= 31:
+                                header_map[day_number] = col_pos
 
                 nome_idx = header_map.get("NOME COMPLETO")
                 last_name = None
@@ -466,7 +500,6 @@ async def normaliza_escala_PACS(request: Request):
                 "plantoes": []
             }
 
-            # --- FILTRO "RP PAES" RESTAURADO ---
             if "PAES" not in profissional_obj["medico_vinculo"].upper():
                 continue
 
@@ -481,8 +514,9 @@ async def normaliza_escala_PACS(request: Request):
                     turnos = interpretar_turno(token, last_setor)
                     try:
                         data_plantao = datetime(last_ano, last_mes, dia)
-                    except ValueError: continue
-                    
+                    except ValueError:
+                        continue
+
                     for turno_info in turnos:
                         horarios = HORARIOS_TURNO.get(turno_info["turno"], {})
                         data_inicio = data_plantao
@@ -510,4 +544,7 @@ async def normaliza_escala_PACS(request: Request):
 
     except Exception as e:
         return JSONResponse(content={"error": str(e), "trace": traceback.format_exc()}, status_code=500)
+
+# --- FIM normaliza-escala-PACS ---
+
 # --- FIM normaliza-escala-PACS ---
