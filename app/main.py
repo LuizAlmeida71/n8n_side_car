@@ -339,15 +339,17 @@ def is_valid_professional_name(name: str):
     return not any(keyword in name_upper for keyword in ignored_keywords) and \
            (len(name.split()) >= 2 or name.isupper())
 
+# --- CORREÇÃO DO ERRO NameError ---
 def dedup_plantao(lista_plantoes: list):
     seen = set()
-    result = []  # CORREÇÃO: Inicializa a lista de resultados
+    result = []  # Inicializa a lista de resultados
     for p in lista_plantoes:
         key = (p["dia"], p["turno"], p["inicio"], p["fim"])
         if key not in seen:
             seen.add(key)
             result.append(p)
     return result
+# --- FIM DA CORREÇÃO ---
 
 @app.post("/normaliza-escala-PACS")
 async def normaliza_escala_PACS(request: Request):
@@ -402,15 +404,18 @@ async def normaliza_escala_PACS(request: Request):
                 header_map = {}
                 for i, col_name in enumerate(header_row):
                     col_pos = i + start_offset
-                    clean_name_upper = str(col_name or '').replace('\n', ' ').strip().upper()
                     
+                    # --- INÍCIO DA CORREÇÃO DEFINITIVA PARA O DIA 31 ---
+                    # Isola a primeira linha do conteúdo da célula, limpa e verifica se é um número.
                     first_line = str(col_name or '').split('\n')[0].strip()
                     if first_line.isdigit():
                         day_number = int(first_line)
                         if 1 <= day_number <= 31:
                             header_map[day_number] = col_pos
-                            continue
+                            continue # Pula para o próximo item, evitando elifs
+                    # --- FIM DA CORREÇÃO DEFINITIVA PARA O DIA 31 ---
                     
+                    clean_name_upper = str(col_name or '').replace('\n', ' ').strip().upper()
                     if "NOME COMPLETO" in clean_name_upper: header_map["NOME COMPLETO"] = col_pos
                     elif "CARGO" in clean_name_upper: header_map["CARGO"] = col_pos
                     elif "VÍNCULO" in clean_name_upper or "VINCULO" in clean_name_upper: header_map["VÍNCULO"] = col_pos
@@ -461,6 +466,7 @@ async def normaliza_escala_PACS(request: Request):
                 "plantoes": []
             }
 
+            # --- FILTRO "RP PAES" RESTAURADO ---
             if "PAES" not in profissional_obj["medico_vinculo"].upper():
                 continue
 
