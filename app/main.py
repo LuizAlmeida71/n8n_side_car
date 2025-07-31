@@ -289,7 +289,6 @@ async def text_to_pdf(request: Request):
 
 
 # --- INICIO normaliza-escala-PACS ---
-
 MONTH_MAP = {
     'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
     'JUNHO': 6, 'JULHO': 7, 'AGOSTO': 8, 'SETEMBRO': 9, 'OUTUBRO': 10,
@@ -342,6 +341,7 @@ def is_valid_professional_name(name: str):
 
 def dedup_plantao(lista_plantoes: list):
     seen = set()
+    result = []  # CORREÇÃO: Inicializa a lista de resultados
     for p in lista_plantoes:
         key = (p["dia"], p["turno"], p["inicio"], p["fim"])
         if key not in seen:
@@ -404,17 +404,13 @@ async def normaliza_escala_PACS(request: Request):
                     col_pos = i + start_offset
                     clean_name_upper = str(col_name or '').replace('\n', ' ').strip().upper()
                     
-                    # --- INÍCIO DA CORREÇÃO DEFINITIVA ---
-                    # Esta lógica agora é a primeira, para evitar que colunas de dia caiam em 'elifs' errados.
-                    # Pega a primeira linha da célula, limpa, e verifica se é um número.
                     first_line = str(col_name or '').split('\n')[0].strip()
                     if first_line.isdigit():
                         day_number = int(first_line)
                         if 1 <= day_number <= 31:
                             header_map[day_number] = col_pos
-                            continue # Pula para o próximo item do cabeçalho
-                    # --- FIM DA CORREÇÃO DEFINITIVA ---
-
+                            continue
+                    
                     if "NOME COMPLETO" in clean_name_upper: header_map["NOME COMPLETO"] = col_pos
                     elif "CARGO" in clean_name_upper: header_map["CARGO"] = col_pos
                     elif "VÍNCULO" in clean_name_upper or "VINCULO" in clean_name_upper: header_map["VÍNCULO"] = col_pos
@@ -465,7 +461,6 @@ async def normaliza_escala_PACS(request: Request):
                 "plantoes": []
             }
 
-            # --- FILTRO "RP PAES" RESTAURADO ---
             if "PAES" not in profissional_obj["medico_vinculo"].upper():
                 continue
 
