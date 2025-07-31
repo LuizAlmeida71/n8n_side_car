@@ -64,31 +64,35 @@ async def split_pdf(file: UploadFile = File(...)):
             tmp.write(contents)
             tmp_path = tmp.name
 
-        doc = fitz.open(tmp_path)
         pages_b64 = []
 
-        for i in range(len(doc)):
-            single_page = fitz.open()
-            single_page.insert_pdf(doc, from_page=i, to_page=i)
+        # Use contexto para garantir que o doc será fechado corretamente
+        with fitz.open(tmp_path) as doc:
+            for i in range(len(doc)):
+                single_page = fitz.open()
+                single_page.insert_pdf(doc, from_page=i, to_page=i)
 
-            # Corrigido: salvar com compactação e limpeza de objetos
-            page_path = f"/tmp/page_{i+1}.pdf"
-            single_page.save(page_path, garbage=4, deflate=True, incremental=False)
+                page_path = f"/tmp/page_{i+1}.pdf"
+                single_page.save(page_path, garbage=4, deflate=True, incremental=False)
 
-            with open(page_path, "rb") as f:
-                b64_content = base64.b64encode(f.read()).decode("utf-8")
-                pages_b64.append({
-                    "page": i + 1,
-                    "file_base64": b64_content,
-                    "filename": f"page_{i+1}.pdf"
-                })
+                with open(page_path, "rb") as f:
+                    b64_content = base64.b64encode(f.read()).decode("utf-8")
+                    pages_b64.append({
+                        "page": i + 1,
+                        "file_base64": b64_content,
+                        "filename": f"page_{i+1}.pdf"
+                    })
 
-            os.remove(page_path)
+                os.remove(page_path)
 
+        os.remove(tmp_path)
         return JSONResponse(content={"pages": pages_b64})
 
     except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+        if 'tmp_path' in locals() and os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        return JSONResponse(content={"error": str(e), "trace": traceback.format_exc()}, status_code=500)
+
 
 
 @app.post("/split-pdf-base64")
