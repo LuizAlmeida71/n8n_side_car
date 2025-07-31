@@ -289,6 +289,19 @@ async def text_to_pdf(request: Request):
 
 
 # --- INICIO normaliza-escala-PACS ---
+# --- INICIO normaliza-escala-PACS ---
+
+import re
+import base64
+import tempfile
+import os
+import fitz  # PyMuPDF
+from fastapi import FastAPI, Request, File, UploadFile
+from fastapi.responses import JSONResponse
+from collections import defaultdict
+from datetime import datetime, timedelta
+
+app = FastAPI()
 
 MONTH_MAP = {
     'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
@@ -449,7 +462,8 @@ async def normaliza_escala_PACS(request: Request):
                     elif "VÍNCULO" in clean_name_upper or "VINCULO" in clean_name_upper: header_map["VÍNCULO"] = col_pos
                     elif "CONSELHO" in clean_name_upper or "CRM" in clean_name_upper: header_map["CRM"] = col_pos
                     else:
-                        day_match = re.match(r'^\s*(\d{1,2})', str(col_name or ''))
+                        # CORREÇÃO REFORÇADA PARA DETECÇÃO DO DIA 31
+                        day_match = re.match(r'^(\d{1,2})(?:\D|$)', str(col_name or '').strip())
                         if day_match:
                             day_number = int(day_match.group(1))
                             if 1 <= day_number <= 31:
@@ -544,7 +558,5 @@ async def normaliza_escala_PACS(request: Request):
 
     except Exception as e:
         return JSONResponse(content={"error": str(e), "trace": traceback.format_exc()}, status_code=500)
-
-# --- FIM normaliza-escala-PACS ---
 
 # --- FIM normaliza-escala-PACS ---
