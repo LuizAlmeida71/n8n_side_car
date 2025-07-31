@@ -367,13 +367,13 @@ async def normaliza_escala_PACS(request: Request):
                 continue
             pdf_bytes = base64.b64decode(b64_data)
             with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
-                for page in doc:
-                    page_text = page.get_text("text")
-                    full_text += page_text + "\n"
-                    for table in page.find_tables():
-                        extracted = table.extract()
-                        if extracted:
-                            all_table_rows.extend(extracted)
+                page = doc[0]
+                page_text = page.get_text("text")
+                full_text += page_text + "\n"
+                for table in page.find_tables():
+                    extracted = table.extract()
+                    if extracted:
+                        all_table_rows.extend(extracted)
 
         unidade_match = re.search(r'UNIDADE:\s*(.*?)\n', full_text, re.IGNORECASE)
         setor_match = re.search(r'SETOR:\s*(.*?)\n', full_text, re.IGNORECASE)
@@ -415,12 +415,44 @@ async def normaliza_escala_PACS(request: Request):
                     elif "CONSELHO" in clean_name or "CRM" in clean_name:
                         header_map["CRM"] = col_pos
                     else:
-                        try:
-                            dia_col = int(str(col_name).strip().split("\n")[0])
-                            header_map[dia_col] = col_pos
-                        except:
-                            pass
+                        # Extrai dias - melhoria para pegar números mesmo com quebras de linha
+                        col_str = str(col_name).strip()
+                        # Tenta várias formas de extrair o número
+                        numero = None
+                        if col_str.isdigit():
+                            numero = int(col_str)
+                        else:
+                            # Tenta pegar o primeiro número da string
+                            import re
+                            match = re.match(r'^(\d+)', col_str)
+                            if match:
+                                numero = int(match.group(1))
+                        
+                        if numero and 1 <= numero <= 31:
+                            header_map[numero] = col_pos
+                            
+                # Tratamento especial para garantir que o dia 31 seja incluído
+                # Verifica se estamos em um mês com 31 dias
+                if last_mes in [1, 3, 5, 7, 8, 10, 12] and 31 not in header_map:
+                    # Procura pela última coluna numérica
+                    for i in range(len(header_row)-1, -1, -1):
+                        col_text = str(header_row[i]).strip()
+                        if "TOTAL" in col_text.upper():
+                            # A coluna 31 deve estar logo antes de TOTAL
+                            if i > 0:
+                                col_antes = str(header_row[i-1]).strip()
+                                if "31" in col_antes or col_antes == "31":
+                                    header_map[31] = i - 1 + start_offset
+                            
                 nome_idx = header_map.get("NOME COMPLETO")
+                
+                # Debug temporário para verificar dia 31
+                if 31 in header_map:
+                    print(f"DEBUG - Dia 31 encontrado na coluna {header_map[31]}")
+                else:
+                    print("DEBUG - Dia 31 NÃO encontrado no header")
+                    print(f"DEBUG - Últimas colunas do header: {header_row[-5:] if len(header_row) > 5 else header_row}")
+                
                 last_name = None
                 idx_linha += 1
                 continue
@@ -459,9 +491,9 @@ async def normaliza_escala_PACS(request: Request):
 
             profissional_obj = {
                 "medico_nome": nome.replace('\n', ' ').strip(),
-                "medico_crm": get_cell_value("CRM"),
-                "medico_especialidade": get_cell_value("CARGO"),
-                "medico_vinculo": get_cell_value("VÍNCULO"),
+                "medico_crm": get_cell_value("CRM").replace('\n', ' ').strip(),
+                "medico_especialidade": get_cell_value("CARGO").replace('\n', ' ').strip(),
+                "medico_vinculo": get_cell_value("VÍNCULO").replace('\n', ' ').strip(),
                 "medico_setor": last_setor.replace('\n', ' ').strip(),
                 "medico_unidade": last_unidade.replace('\n', ' ').strip(),
                 "plantoes": []
@@ -473,24 +505,20 @@ async def normaliza_escala_PACS(request: Request):
             plantoes_brutos = defaultdict(list)
             for row in info_rows:
                 for dia, col_idx in header_map.items():
-                    if isinstance(dia, int) and col_idx < len(row):
-                        valor = row[col_idx]
-                        if valor is not None and str(valor).strip():
-                            plantoes_brutos[dia].append(str(valor).strip())
+                    if isinstance(dia, int) and col_idx < len(row) and row[col_idx]:
+                        valor = str(row[col_idx]).strip()
+                        if valor and valor not in ['-', '']:
+                            plantoes_brutos[dia].append(valor)
 
             for dia, tokens in sorted(plantoes_brutos.items()):
                 for token in tokens:
                     turnos = interpretar_turno(token, last_setor)
-                    try:
-                        data_plantao = datetime(last_ano, last_mes, dia)
-                    except:
-                        continue
+                    data_plantao = datetime(last_ano, last_mes, dia)
                     for turno_info in turnos:
                         horarios = HORARIOS_TURNO.get(turno_info["turno"], {})
                         data_inicio = data_plantao
                         if turno_info["turno"] == "NOITE (fim)":
                             data_inicio += timedelta(days=1)
-                        data_hora_ordenacao = datetime.strptime(f"{data_inicio.strftime('%Y-%m-%d')} {horarios.get('inicio', '00:00')}", "%Y-%m-%d %H:%M")
                         profissional_obj["plantoes"].append({
                             "data": data_inicio.strftime('%d/%m/%Y'),
                             "dia": data_inicio.day,
@@ -498,7 +526,7 @@ async def normaliza_escala_PACS(request: Request):
                             "setor": last_setor,
                             "inicio": horarios.get("inicio"),
                             "fim": horarios.get("fim"),
-                            "ordenacao": data_hora_ordenacao
+                            "ordenacao": datetime.strptime(f"{data_inicio.strftime('%Y-%m-%d')} {horarios.get('inicio', '00:00')}", "%Y-%m-%d %H:%M")
                         })
 
             profissional_obj["plantoes"] = dedup_plantao(profissional_obj["plantoes"])
