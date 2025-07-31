@@ -415,7 +415,7 @@ async def normaliza_escala_PACS(request: Request):
                     elif "CONSELHO" in clean_name or "CRM" in clean_name:
                         header_map["CRM"] = col_pos
                     else:
-                        match = re.match(r'\D*(\d{1,2})\b', str(col_name).strip())
+                        match = re.search(r'(\d{1,2})(?!\S)', str(col_name).strip())
                         if match:
                             dia_col = int(match.group(1))
                             header_map[dia_col] = col_pos
@@ -523,3 +523,4 @@ async def normaliza_escala_PACS(request: Request):
         )
 
 # --- FIM normaliza-escala-PACS ---
+
