@@ -1238,38 +1238,28 @@ async def normaliza_escala_MATERNIDADE_MATRICIAL(request: Request):
                             crm = str(row[header.get("crm", -1)] or "").strip()
                             cargo = str(row[header.get("cargo", -1)] or "").strip()
                             
-                            # DEBUG para vínculo
+                            # Busca PAES em matrícula ou vínculo
+                            matricula = str(row[header.get("matricula", -1)] or "").strip()
                             vinculo = str(row[header.get("vinculo", -1)] or "").strip()
-                            print(f"Vínculo na coluna: '{vinculo}'")
                             
-                            if not vinculo or vinculo == "None":
-                                # Busca em toda a linha quando não encontra na coluna específica
+                            print(f"Matrícula: '{matricula}'")
+                            print(f"Vínculo: '{vinculo}'")
+                            
+                            # Verifica se PAES está em qualquer um dos campos
+                            tem_paes = ("PAES" in matricula.upper()) or ("PAES" in vinculo.upper())
+                            
+                            if not tem_paes:
+                                # Se não encontrou, busca na linha inteira
                                 linha_completa = " ".join(str(cell or '').strip() for cell in row if cell)
+                                tem_paes = "PAES" in linha_completa.upper()
                                 print(f"Linha completa: '{linha_completa}'")
-                                
-                                # Padrões mais abrangentes para capturar diferentes formatos
-                                vinculo_patterns = [
-                                    r'(RPPAES\s*PJ)',
-                                    r'(PJ\s+RPPAES)', 
-                                    r'(RPPAES)',
-                                    r'(R\.?P\.?\s*PAES[^,\n]*)',
-                                    r'(PJ-RP\s*PAES[^,\n]*)'
-                                ]
-                                for pattern in vinculo_patterns:
-                                    vinculo_match = re.search(pattern, linha_completa, re.IGNORECASE)
-                                    if vinculo_match:
-                                        vinculo = vinculo_match.group(1).strip()
-                                        print(f"Vínculo encontrado com pattern '{pattern}': '{vinculo}'")
-                                        break
-
-                            print(f"Vínculo final: '{vinculo}'")
+                                print(f"PAES encontrado na linha: {tem_paes}")
                             
-                            # Validação correta do vínculo - deve conter PAES
-                            if not vinculo or "PAES" not in vinculo.upper():
-                                print(f"Vínculo rejeitado para {nome}: '{vinculo}'")
+                            if not tem_paes:
+                                print(f"Profissional rejeitado - sem PAES: {nome}")
                                 continue
                             
-                            print(f"Vínculo aceito para {nome}: '{vinculo}'")
+                            print(f"Profissional aceito - tem PAES: {nome}")
 
                             plantoes = []
                             for dia in range(1, 32):
@@ -1297,7 +1287,7 @@ async def normaliza_escala_MATERNIDADE_MATRICIAL(request: Request):
                                     "medico_nome": nome,
                                     "medico_crm": crm,
                                     "medico_especialidade": cargo,
-                                    "medico_vinculo": vinculo,
+                                    "medico_vinculo": vinculo,  # Mantém o vínculo original
                                     "medico_setor": nome_setor,
                                     "medico_unidade": nome_unidade,
                                     "plantoes": dedup_plantao(plantoes)
