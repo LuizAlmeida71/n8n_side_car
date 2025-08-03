@@ -554,7 +554,6 @@ async def normaliza_escala_PACS(request: Request):
 
 
 # --- INÍCIO normaliza-MATERNIDADE-MATRICIAL ---
-
 MONTH_MAP = {
     'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
     'JUNHO': 6, 'JULHO': 7, 'AGOSTO': 8, 'SETEMBRO': 9, 'OUTUBRO': 10,
@@ -615,95 +614,97 @@ def dedup_plantao(plantoes):
 async def normaliza_escala_MATERNIDADE_MATRICIAL(request: Request):
     try:
         body = await request.json()
-        all_table_rows = []
-        full_text = ""
+        profissionais = []
+
         for item in body:
             b64 = item.get("base64") or item.get("bae64")
             if not b64:
                 continue
+
             pdf_bytes = base64.b64decode(b64)
             with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
                 for page in pdf.pages:
-                    full_text += page.extract_text() + "\n"
+                    text = page.extract_text() or ""
                     tables = page.extract_tables()
+
+                    unidade = re.search(r'UNIDADE:\s*(.*?)\n', text, re.IGNORECASE)
+                    setor = re.search(r'(UNIDADE/SETOR|SETOR):\s*(.*?)\n', text, re.IGNORECASE)
+                    servico = re.search(r'ESCALA DE SERVIÇO:\s*(.*?)\n', text, re.IGNORECASE)
+                    mes, ano = parse_mes_ano(text)
+
+                    if not mes or not ano:
+                        continue
+
+                    nome_unidade = unidade.group(1).strip() if unidade else "NÃO INFORMADO"
+                    nome_setor = setor.group(2).strip() if setor else "NÃO INFORMADO"
+                    if servico:
+                        nome_setor += f" ESCALA DE SERVIÇO: {servico.group(1).strip()}"
+
+                    header = {}
                     for table in tables:
                         for row in table:
-                            if any(cell and str(cell).strip() for cell in row):
-                                all_table_rows.append(row)
+                            if not header and any("NOME" in str(c).upper() for c in row if c):
+                                for i, col in enumerate(row):
+                                    col_clean = (col or "").strip().upper()
+                                    if "NOME" in col_clean: header["nome"] = i
+                                    elif "CARGO" in col_clean: header["cargo"] = i
+                                    elif "VÍNCULO" in col_clean or "VINCULO" in col_clean: header["vinculo"] = i
+                                    elif "CRM" in col_clean or "CONSELHO" in col_clean: header["crm"] = i
+                                    elif re.fullmatch(r"\d{1,2}", col_clean): header[int(col_clean)] = i
+                                continue
 
-        unidade_match = re.search(r'UNIDADE:\s*(.*?)\n', full_text, re.IGNORECASE)
-        setor_match = re.search(r'SETOR:\s*(.*?)\n', full_text, re.IGNORECASE)
-        mes, ano = parse_mes_ano(full_text)
+                            if "nome" not in header or not row or not row[header["nome"]]:
+                                continue
 
-        if not mes or not ano:
-            return JSONResponse(content={"error": "Mês/Ano não encontrados."}, status_code=400)
+                            nome = str(row[header["nome"]]).replace('\n', ' ').strip()
+                            crm = str(row[header.get("crm", -1)] or "").strip()
+                            cargo = str(row[header.get("cargo", -1)] or "").strip()
+                            vinculo = str(row[header.get("vinculo", -1)] or "").strip()
 
-        unidade = unidade_match.group(1).strip() if unidade_match else "NÃO INFORMADO"
-        setor = setor_match.group(1).strip() if setor_match else "NÃO INFORMADO"
+                            if "PAES" not in vinculo.upper():
+                                continue
 
-        header = {}
-        profissionais = []
-        for row in all_table_rows:
-            if not header and any("NOME" in str(c).upper() for c in row if c):
-                for i, col in enumerate(row):
-                    col_clean = (col or "").strip().upper()
-                    if "NOME" in col_clean: header["nome"] = i
-                    elif "CARGO" in col_clean: header["cargo"] = i
-                    elif "VÍNCULO" in col_clean or "VINCULO" in col_clean: header["vinculo"] = i
-                    elif "CRM" in col_clean or "CONSELHO" in col_clean: header["crm"] = i
-                    elif re.fullmatch(r"\d{1,2}", col_clean): header[int(col_clean)] = i
-                continue
+                            plantoes = []
+                            for dia in range(1, 32):
+                                idx = header.get(dia)
+                                if idx is None or idx >= len(row): continue
+                                cell = row[idx]
+                                if not cell: continue
+                                for turno in interpretar_turno(str(cell)):
+                                    data_plantao = datetime(ano, mes, dia)
+                                    if turno["turno"] == "NOITE (fim)":
+                                        data_plantao += timedelta(days=1)
+                                    horario = HORARIOS_TURNO[turno["turno"]]
+                                    plantoes.append({
+                                        "dia": data_plantao.day,
+                                        "data": data_plantao.strftime("%d/%m/%Y"),
+                                        "turno": turno["turno"],
+                                        "inicio": horario["inicio"],
+                                        "fim": horario["fim"],
+                                        "setor": nome_setor,
+                                        "medico_setor": nome_setor
+                                    })
 
-            if "nome" not in header or not row or not row[header["nome"]]:
-                continue
-
-            nome = str(row[header["nome"]]).replace('\n', ' ').strip()
-            crm = str(row[header.get("crm", -1)] or "").strip()
-            cargo = str(row[header.get("cargo", -1)] or "").strip()
-            vinculo = str(row[header.get("vinculo", -1)] or "").strip()
-
-            if "PAES" not in vinculo.upper():
-                continue
-
-            plantoes = []
-            for dia in range(1, 32):
-                idx = header.get(dia)
-                if idx is None or idx >= len(row): continue
-                cell = row[idx]
-                if not cell: continue
-                for turno in interpretar_turno(str(cell)):
-                    data_plantao = datetime(ano, mes, dia)
-                    if turno["turno"] == "NOITE (fim)":
-                        data_plantao += timedelta(days=1)
-                    horario = HORARIOS_TURNO[turno["turno"]]
-                    plantoes.append({
-                        "dia": data_plantao.day,
-                        "data": data_plantao.strftime("%d/%m/%Y"),
-                        "turno": turno["turno"],
-                        "inicio": horario["inicio"],
-                        "fim": horario["fim"],
-                        "setor": setor
-                    })
-
-            if plantoes:
-                profissionais.append({
-                    "medico_nome": nome,
-                    "medico_crm": crm,
-                    "medico_especialidade": cargo,
-                    "medico_vinculo": vinculo,
-                    "medico_setor": setor,
-                    "medico_unidade": unidade,
-                    "plantoes": dedup_plantao(plantoes)
-                })
+                            if plantoes:
+                                profissionais.append({
+                                    "medico_nome": nome,
+                                    "medico_crm": crm,
+                                    "medico_especialidade": cargo,
+                                    "medico_vinculo": vinculo,
+                                    "medico_setor": nome_setor,
+                                    "medico_unidade": nome_unidade,
+                                    "plantoes": dedup_plantao(plantoes)
+                                })
 
         profissionais.sort(key=lambda p: p["medico_nome"])
-        mes_nome_str = [k for k, v in MONTH_MAP.items() if v == mes][0]
+        mes_nome_str = [k for k, v in MONTH_MAP.items() if v == mes][0] if mes else ""
         return JSONResponse(content=[{
-            "unidade_escala": unidade,
+            "unidade_escala": "MISTA",
             "mes_ano_escala": f"{mes_nome_str}/{ano}",
             "profissionais": profissionais
         }])
 
     except Exception as e:
         return JSONResponse(content={"error": str(e), "trace": traceback.format_exc()}, status_code=500)
+
 # --- FIM normaliza-escala-MATERNIDADE-MATRICIAL ---
