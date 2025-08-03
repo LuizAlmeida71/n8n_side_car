@@ -1085,9 +1085,6 @@ async def normaliza_escala_PACS(request: Request):
 
 # --- FIM normaliza-escala-PACS ---
 
-
-# --- INÍCIO normaliza-ESCALA-MATRIZ ---
-
 MONTH_MAP = {
     'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
     'JUNHO': 6, 'JULHO': 7, 'AGOSTO': 8, 'SETEMBRO': 9, 'OUTUBRO': 10,
@@ -1158,16 +1155,16 @@ def processar_pagina_pdf(b64_content, page_info=""):
 
                 tables = page.extract_tables()
 
-                unidade_match = re.search(r'UNIDADE:?\s*([^\n]+)', text, re.IGNORECASE)
-                setor_match = re.search(r'SETOR:?\s*\n?([^\n]+)', text, re.IGNORECASE)
-                mes, ano = parse_mes_ano(text)
+                unidade_match = re.search(r'UNIDADE: ?\s*([^\n]+)', text, re.IGNORECASE)
+                setor_match = re.findall(r'SETOR:?\s*\n*([^\n]{3,})', text, re.IGNORECASE)
+                nome_setor = setor_match[-1].strip() if setor_match else "NÃO INFORMADO"
+                nome_setor = re.split(r'\s*ESCALA\s+DE\s+SERVIÇO', nome_setor, 1, re.IGNORECASE)[0].strip()
 
+                mes, ano = parse_mes_ano(text)
                 if not mes or not ano:
                     continue
 
                 nome_unidade = unidade_match.group(1).strip() if unidade_match else "NÃO INFORMADO"
-                nome_setor = setor_match.group(1).strip() if setor_match else "NÃO INFORMADO"
-                nome_setor = re.split(r'\s*ESCALA\s+DE\s+SERVIÇO', nome_setor, 1, re.IGNORECASE)[0].strip()
 
                 for table in tables:
                     header = {}
