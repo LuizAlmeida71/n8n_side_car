@@ -1110,7 +1110,10 @@ else:
                         print(f"=== CABEÇALHO DA PÁGINA {page_num + 1} ===")
                         linhas_cabecalho = text.split('\n')[:10]  # Primeiras 10 linhas
                         for i, linha in enumerate(linhas_cabecalho):
-                            print(f"Linha {i+1}: '{linha}'")MONTH_MAP = {
+                            print(f"Linha {i+1}: '{linha}'")
+                        
+                        # Mesmo processamento do formato novo...
+                        # (código duplicado por simplicidade)MONTH_MAP = {
     'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
     'JUNHO': 6, 'JULHO': 7, 'AGOSTO': 8, 'SETEMBRO': 9, 'OUTUBRO': 10,
     'NOVEMBRO': 11, 'DEZEMBRO': 12
@@ -1165,10 +1168,6 @@ def dedup_plantao(plantoes):
             seen.add(key)
             result.append(p)
     return result
-
-
-
-
 
 @app.post("/normaliza-escala-MATERNIDADE-MATRICIAL")
 async def normaliza_escala_MATERNIDADE_MATRICIAL(request: Request):
