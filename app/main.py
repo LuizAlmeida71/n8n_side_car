@@ -1143,86 +1143,35 @@ def dedup_plantao(plantoes):
     return result
 
 def processar_pagina_pdf(b64_content, page_info=""):
-    """Processa uma única página PDF e retorna os profissionais encontrados"""
     try:
         pdf_bytes = base64.b64decode(b64_content)
         profissionais = []
-        
+
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             for page in pdf.pages:
-                raw_text = page.extract_text() or ""
-                
-                # CORREÇÃO: Remove linhas problemáticas que começam com "Governo do Estado"
-                lines = raw_text.split('\n')
-                clean_lines = []
-                for line in lines:
-                    line = line.strip()
-                    # Pula linhas que começam com "Governo do Estado" e são duplicadas
-                    if line.startswith("Governo do Estado de Roraima"):
-                        continue
-                    clean_lines.append(line)
-                
-                text = '\n'.join(clean_lines)
-                print(f"{page_info} - Texto limpo, removidas {len(lines) - len(clean_lines)} linhas problemáticas")
-                
+                text = page.extract_text() or ""
                 tables = page.extract_tables()
 
-                # Extração de informações básicas
                 unidade_match = re.search(r'UNIDADE:\s*(.*?)\n', text, re.IGNORECASE)
+                setor_match = re.search(r'(UNIDADE/SETOR|SETOR):\s*((?:.*?)(?:\n[^\n]*?)*?)(?:\n|$)', text, re.IGNORECASE)
                 mes, ano = parse_mes_ano(text)
 
                 if not mes or not ano:
                     continue
 
                 nome_unidade = unidade_match.group(1).strip() if unidade_match else "NÃO INFORMADO"
-                
-                # Extração do setor - com múltiplas tentativas
-                nome_setor = "NÃO INFORMADO"
-                
-                if "UNIDADE/SETOR:" in text:
-                    print(f"{page_info} - Texto CONTÉM 'UNIDADE/SETOR:'")
-                    setor_match = re.search(r'UNIDADE/SETOR:\s*([^\n]+)', text, re.IGNORECASE)
-                    if setor_match:
-                        nome_setor = setor_match.group(1).strip()
-                        print(f"{page_info} - Setor ENCONTRADO: '{nome_setor}'")
-                        nome_setor = re.split(r'\s*ESCALA\s+DE\s+SERVIÇO', nome_setor, 1, re.IGNORECASE)[0].strip()
-                        print(f"{page_info} - Setor LIMPO: '{nome_setor}'")
-                    else:
-                        print(f"{page_info} - REGEX falhou mesmo com texto presente!")
-                
-                # Tentativa alternativa 1: Apenas "SETOR:"
-                elif "SETOR:" in text:
-                    print(f"{page_info} - Tentando busca alternativa por 'SETOR:'")
-                    setor_match = re.search(r'SETOR:\s*([^\n]+)', text, re.IGNORECASE)
-                    if setor_match:
-                        nome_setor = setor_match.group(1).strip()
-                        print(f"{page_info} - Setor alternativo ENCONTRADO: '{nome_setor}'")
-                        nome_setor = re.split(r'\s*ESCALA\s+DE\s+SERVIÇO', nome_setor, 1, re.IGNORECASE)[0].strip()
-                
-                # Tentativa alternativa 2: Busca mais ampla por setores conhecidos
-                elif any(setor in text.upper() for setor in ["NIR", "CAMED", "ISOLAMENTO", "UTIN", "BLOCOS"]):
-                    print(f"{page_info} - Tentando detectar setor por palavras-chave")
-                    if "NIR" in text.upper() and "ISOLAMENTO" in text.upper():
-                        nome_setor = "NIR/ISOLAMENTO/BLOCOS/UTIN/UTIM"
-                        print(f"{page_info} - Setor detectado por palavras-chave: '{nome_setor}'")
-                    elif "CAMED" in text.upper() and "BLOCOS" in text.upper():
-                        nome_setor = "CAMED/BLOCOS/ISOLAMENTO/UTIN/UCINco/UCINca"
-                        print(f"{page_info} - Setor detectado por palavras-chave: '{nome_setor}'")
-                    else:
-                        print(f"{page_info} - Palavras-chave encontradas mas não foi possível determinar setor")
-                
+
+                if setor_match:
+                    nome_setor = setor_match.group(2).strip()
+                    nome_setor = re.split(r'\s*ESCALA\s+DE\s+SERVIÇO', nome_setor, 1, re.IGNORECASE)[0].strip()
                 else:
-                    print(f"{page_info} - Texto NÃO CONTÉM 'UNIDADE/SETOR:' nem 'SETOR:'")
-                    print(f"{page_info} - Primeira linha: '{text.split(chr(10))[0] if text else 'VAZIO'}'")
-                    print(f"{page_info} - NENHUM setor encontrado!")
+                    nome_setor = "NÃO INFORMADO"
 
                 print(f"{page_info} - Setor: '{nome_setor}'")
 
-                # Processamento de tabelas
                 for table in tables:
                     header = {}
                     for row in table:
-                        # Identificar cabeçalho
                         if not header and any("NOME" in str(c).upper() for c in row if c):
                             for i, col in enumerate(row):
                                 col_clean = (col or "").strip().upper()
@@ -1240,8 +1189,7 @@ def processar_pagina_pdf(b64_content, page_info=""):
                         crm = str(row[header.get("crm", -1)] or "").strip()
                         cargo = str(row[header.get("cargo", -1)] or "").strip()
                         vinculo = str(row[header.get("vinculo", -1)] or "").strip()
-                        
-                        # Busca PAES na linha completa se não encontrou no vínculo
+
                         if "PAES" not in vinculo.upper():
                             linha_completa = " ".join(str(cell or '').strip() for cell in row if cell)
                             if "PAES" not in linha_completa.upper():
@@ -1278,70 +1226,9 @@ def processar_pagina_pdf(b64_content, page_info=""):
                                 "medico_unidade": nome_unidade,
                                 "plantoes": dedup_plantao(plantoes)
                             })
-        
+
         return profissionais
     except Exception as e:
         print(f"Erro processando {page_info}: {str(e)}")
         return []
-
-@app.post("/normaliza-escala-MATERNIDADE-MATRICIAL")
-async def normaliza_escala_MATERNIDADE_MATRICIAL(request: Request):
-    try:
-        body = await request.json()
-        profissionais = []
-        
-        print(f"Formato recebido: {type(body)}")
-        
-        # Formato do split-pdf: {"pages": [{"page": 1, "file_base64": "...", "filename": "..."}]}
-        if isinstance(body, dict) and "pages" in body:
-            print(f"Processando {len(body['pages'])} páginas do split-pdf")
-            for page_data in body["pages"]:
-                b64 = page_data.get("file_base64")
-                page_number = page_data.get("page", "unknown")
-                
-                if b64:
-                    page_profissionais = processar_pagina_pdf(b64, f"Página {page_number}")
-                    profissionais.extend(page_profissionais)
-        
-        # Formato antigo: [{"data": [...]}, ...]
-        elif isinstance(body, list):
-            for item in body:
-                if "data" in item and isinstance(item["data"], list):
-                    for page_data in item["data"]:
-                        b64 = page_data.get("base64") or page_data.get("bae64")
-                        page_number = page_data.get("page_number", "unknown")
-                        
-                        if b64:
-                            page_profissionais = processar_pagina_pdf(b64, f"Página {page_number}")
-                            profissionais.extend(page_profissionais)
-                else:
-                    # Formato mais antigo: [{"base64": "..."}]
-                    b64 = item.get("base64") or item.get("bae64")
-                    if b64:
-                        page_profissionais = processar_pagina_pdf(b64, "Página única")
-                        profissionais.extend(page_profissionais)
-
-        profissionais.sort(key=lambda p: p["medico_nome"])
-        
-        # Determinar mês/ano da primeira página processada
-        mes_nome_str = "JUNHO"  # Fallback
-        ano = 2025
-        if profissionais:
-            # Pegar do primeiro profissional
-            primeiro_plantao = profissionais[0]["plantoes"][0] if profissionais[0]["plantoes"] else None
-            if primeiro_plantao:
-                data_parts = primeiro_plantao["data"].split("/")
-                mes = int(data_parts[1])
-                ano = int(data_parts[2])
-                mes_nome_str = [k for k, v in MONTH_MAP.items() if v == mes][0]
-        
-        return JSONResponse(content=[{
-            "unidade_escala": "MISTA",
-            "mes_ano_escala": f"{mes_nome_str}/{ano}",
-            "profissionais": profissionais
-        }])
-
-    except Exception as e:
-        print(f"Erro geral: {str(e)}")
-        return JSONResponse(content={"error": str(e), "trace": traceback.format_exc()}, status_code=500)
 # --- FIM normaliza-escala-MATERNIDADE-MATRICIAL ---
