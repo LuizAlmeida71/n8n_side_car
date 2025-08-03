@@ -1150,7 +1150,21 @@ def processar_pagina_pdf(b64_content, page_info=""):
         
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             for page in pdf.pages:
-                text = page.extract_text() or ""
+                raw_text = page.extract_text() or ""
+                
+                # CORREÇÃO: Remove linhas problemáticas que começam com "Governo do Estado"
+                lines = raw_text.split('\n')
+                clean_lines = []
+                for line in lines:
+                    line = line.strip()
+                    # Pula linhas que começam com "Governo do Estado" e são duplicadas
+                    if line.startswith("Governo do Estado de Roraima"):
+                        continue
+                    clean_lines.append(line)
+                
+                text = '\n'.join(clean_lines)
+                print(f"{page_info} - Texto limpo, removidas {len(lines) - len(clean_lines)} linhas problemáticas")
+                
                 tables = page.extract_tables()
 
                 # Extração de informações básicas
