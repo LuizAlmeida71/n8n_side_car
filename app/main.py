@@ -1164,10 +1164,6 @@ def dedup_plantao(plantoes):
             result.append(p)
     return result
 
-
-
-
-
 @app.post("/normaliza-escala-MATERNIDADE-MATRICIAL")
 async def normaliza_escala_MATERNIDADE_MATRICIAL(request: Request):
     try:
@@ -1191,11 +1187,15 @@ async def normaliza_escala_MATERNIDADE_MATRICIAL(request: Request):
                         continue
 
                     nome_unidade = unidade_match.group(1).strip() if unidade_match else "NÃO INFORMADO"
-                    # Extração do setor corrigida
-                    setor_match = re.search(r'(UNIDADE/SETOR|SETOR):\s*(.*?)\n', text, re.IGNORECASE)
+                    # Extração do setor corrigida para capturar texto que continua na mesma linha
+                    setor_match = re.search(r'(UNIDADE/SETOR|SETOR):\s*([^E]+?)(?=\s*ESCALA\s+DE\s+SERVIÇO|$)', text, re.IGNORECASE)
+                    if not setor_match:
+                        # Fallback: busca até quebra de linha
+                        setor_match = re.search(r'(UNIDADE/SETOR|SETOR):\s*(.*?)\n', text, re.IGNORECASE)
+                    
                     nome_setor = setor_match.group(2).strip() if setor_match else "NÃO INFORMADO"
-                    # Remove tudo a partir de "ESCALA DE SERVIÇO"
-                    nome_setor = re.split(r'ESCALA\s+DE\s+SERVIÇO', nome_setor, 1, re.IGNORECASE)[0].strip()
+                    # Limpa espaços extras e normaliza
+                    nome_setor = re.sub(r'\s+', ' ', nome_setor)
 
                     for table in tables:
                         header = {}
@@ -1217,14 +1217,24 @@ async def normaliza_escala_MATERNIDADE_MATRICIAL(request: Request):
                             crm = str(row[header.get("crm", -1)] or "").strip()
                             cargo = str(row[header.get("cargo", -1)] or "").strip()
                             
-                            # Extração de vínculo melhorada para casos como Paola
+                            # Extração de vínculo melhorada para PAOLA e outros casos
                             vinculo = str(row[header.get("vinculo", -1)] or "").strip()
                             if not vinculo or vinculo == "None":
                                 # Busca em toda a linha quando não encontra na coluna específica
                                 linha_completa = " ".join(str(cell or '').strip() for cell in row if cell)
-                                vinculo_match = re.search(r'(R\.?P\.?\s*PAES[^,\n]*|PJ-RP\s*PAES[^,\n]*|RPPAES[^,\n]*)', linha_completa, re.IGNORECASE)
-                                if vinculo_match:
-                                    vinculo = vinculo_match.group(1).strip()
+                                # Padrões mais abrangentes para capturar diferentes formatos
+                                vinculo_patterns = [
+                                    r'(RPPAES\s*PJ)',
+                                    r'(PJ\s+RPPAES)', 
+                                    r'(RPPAES)',
+                                    r'(R\.?P\.?\s*PAES[^,\n]*)',
+                                    r'(PJ-RP\s*PAES[^,\n]*)'
+                                ]
+                                for pattern in vinculo_patterns:
+                                    vinculo_match = re.search(pattern, linha_completa, re.IGNORECASE)
+                                    if vinculo_match:
+                                        vinculo = vinculo_match.group(1).strip()
+                                        break
 
                             # Validação correta do vínculo - deve conter PAES
                             if not vinculo or "PAES" not in vinculo.upper():
