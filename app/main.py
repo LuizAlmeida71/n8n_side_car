@@ -624,7 +624,7 @@ async def normaliza_escala_MATERNIDADE_MATRICIAL(request: Request):
                         if idx is None or idx >= len(row): continue
                         cell = row[idx]
                         if not cell: continue
-                        for turno in interpretar_turno(str(cell)):
+                        for turno in for turno in interpretar_turno(str(cell), nome_setor):
                             data_plantao = datetime(ano, mes, dia)
                             if turno["turno"] == "NOITE (fim)":
                                 data_plantao += timedelta(days=1)
