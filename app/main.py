@@ -1112,13 +1112,13 @@ def parse_mes_ano(text):
 
 def extrair_setor(text, lines):
     """
-    Função simplificada para extrair o setor do padrão UNIDADE/SETOR: [nome] ESCALA DE SERVIÇO:
+    Função para extrair o setor do padrão UNIDADE/SETOR: [nome] ESCALA DE SERVIÇO:
     """
     # Procurar pela linha que contém UNIDADE/SETOR: 
     for line in lines:
-        if 'UNIDADE/SETOR:' in line:
-            # Usar regex para extrair o setor entre UNIDADE/SETOR: e ESCALA DE SERVIÇO:
-            match = re.search(r'UNIDADE/SETOR:\s*([^|]+?)\s*(?:\||ESCALA DE SERVIÇO:)', line)
+        if 'UNIDADE/SETOR:' in line.upper():
+            # Usar regex para extrair o setor - mais flexível com espaços
+            match = re.search(r'UNIDADE/SETOR:\s*([^|\n]+?)\s*(?:ESCALA\s+DE\s+SERVIÇO:|$)', line, re.IGNORECASE)
             if match:
                 setor = match.group(1).strip()
                 return setor
@@ -1229,9 +1229,9 @@ def processar_pagina_pdf(b64_content, page_info=""):
                         vinculo = str(row[header.get("vinculo", -1)] or "").replace('\n', ' ').strip()
                         matricula = str(row[header.get("matricula", -1)] or "").replace('\n', ' ').strip()
 
-                        # Verificar se é médico PAES
-                        texto_vinculo = str(vinculo).upper()
-                        if "PAES" not in texto_vinculo:
+                        # Verificar se é médico PAES (em vínculo OU matrícula)
+                        texto_busca = f"{vinculo} {matricula}".upper()
+                        if "PAES" not in texto_busca:
                             continue
 
                         # Processar plantões
