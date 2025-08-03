@@ -1162,22 +1162,45 @@ def processar_pagina_pdf(b64_content, page_info=""):
 
                 nome_unidade = unidade_match.group(1).strip() if unidade_match else "NÃO INFORMADO"
                 
-                # Extração do setor - debug detalhado que SERÁ executado
+                # Extração do setor - com múltiplas tentativas
+                nome_setor = "NÃO INFORMADO"
+                
                 if "UNIDADE/SETOR:" in text:
                     print(f"{page_info} - Texto CONTÉM 'UNIDADE/SETOR:'")
-                else:
-                    print(f"{page_info} - Texto NÃO CONTÉM 'UNIDADE/SETOR:'")
-                    print(f"{page_info} - Primeira linha: '{text.split(chr(10))[0] if text else 'VAZIO'}'")
+                    setor_match = re.search(r'UNIDADE/SETOR:\s*([^\n]+)', text, re.IGNORECASE)
+                    if setor_match:
+                        nome_setor = setor_match.group(1).strip()
+                        print(f"{page_info} - Setor ENCONTRADO: '{nome_setor}'")
+                        nome_setor = re.split(r'\s*ESCALA\s+DE\s+SERVIÇO', nome_setor, 1, re.IGNORECASE)[0].strip()
+                        print(f"{page_info} - Setor LIMPO: '{nome_setor}'")
+                    else:
+                        print(f"{page_info} - REGEX falhou mesmo com texto presente!")
                 
-                setor_match = re.search(r'UNIDADE/SETOR:\s*([^\n]+)', text, re.IGNORECASE)
-                if setor_match:
-                    nome_setor = setor_match.group(1).strip()
-                    print(f"{page_info} - Setor ENCONTRADO: '{nome_setor}'")
-                    nome_setor = re.split(r'\s*ESCALA\s+DE\s+SERVIÇO', nome_setor, 1, re.IGNORECASE)[0].strip()
-                    print(f"{page_info} - Setor LIMPO: '{nome_setor}'")
+                # Tentativa alternativa 1: Apenas "SETOR:"
+                elif "SETOR:" in text:
+                    print(f"{page_info} - Tentando busca alternativa por 'SETOR:'")
+                    setor_match = re.search(r'SETOR:\s*([^\n]+)', text, re.IGNORECASE)
+                    if setor_match:
+                        nome_setor = setor_match.group(1).strip()
+                        print(f"{page_info} - Setor alternativo ENCONTRADO: '{nome_setor}'")
+                        nome_setor = re.split(r'\s*ESCALA\s+DE\s+SERVIÇO', nome_setor, 1, re.IGNORECASE)[0].strip()
+                
+                # Tentativa alternativa 2: Busca mais ampla por setores conhecidos
+                elif any(setor in text.upper() for setor in ["NIR", "CAMED", "ISOLAMENTO", "UTIN", "BLOCOS"]):
+                    print(f"{page_info} - Tentando detectar setor por palavras-chave")
+                    if "NIR" in text.upper() and "ISOLAMENTO" in text.upper():
+                        nome_setor = "NIR/ISOLAMENTO/BLOCOS/UTIN/UTIM"
+                        print(f"{page_info} - Setor detectado por palavras-chave: '{nome_setor}'")
+                    elif "CAMED" in text.upper() and "BLOCOS" in text.upper():
+                        nome_setor = "CAMED/BLOCOS/ISOLAMENTO/UTIN/UCINco/UCINca"
+                        print(f"{page_info} - Setor detectado por palavras-chave: '{nome_setor}'")
+                    else:
+                        print(f"{page_info} - Palavras-chave encontradas mas não foi possível determinar setor")
+                
                 else:
-                    print(f"{page_info} - REGEX NÃO ENCONTROU setor!")
-                    nome_setor = "NÃO INFORMADO"
+                    print(f"{page_info} - Texto NÃO CONTÉM 'UNIDADE/SETOR:' nem 'SETOR:'")
+                    print(f"{page_info} - Primeira linha: '{text.split(chr(10))[0] if text else 'VAZIO'}'")
+                    print(f"{page_info} - NENHUM setor encontrado!")
 
                 print(f"{page_info} - Setor: '{nome_setor}'")
 
