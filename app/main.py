@@ -1158,20 +1158,16 @@ def processar_pagina_pdf(b64_content, page_info=""):
 
                 tables = page.extract_tables()
 
-                unidade_match = re.search(r'UNIDADE:\s*(.*?)\n', text, re.IGNORECASE)
-                setor_match = re.search(r'(UNIDADE/SETOR|SETOR):\s*((?:.*?)(?:\n[^\n]*?)*?)(?:\n|$)', text, re.IGNORECASE)
+                unidade_match = re.search(r'UNIDADE:?\s*([^\n]+)', text, re.IGNORECASE)
+                setor_match = re.search(r'SETOR:?\s*\n?([^\n]+)', text, re.IGNORECASE)
                 mes, ano = parse_mes_ano(text)
 
                 if not mes or not ano:
                     continue
 
                 nome_unidade = unidade_match.group(1).strip() if unidade_match else "NÃO INFORMADO"
-
-                if setor_match:
-                    nome_setor = setor_match.group(2).strip()
-                    nome_setor = re.split(r'\s*ESCALA\s+DE\s+SERVIÇO', nome_setor, 1, re.IGNORECASE)[0].strip()
-                else:
-                    nome_setor = "NÃO INFORMADO"
+                nome_setor = setor_match.group(1).strip() if setor_match else "NÃO INFORMADO"
+                nome_setor = re.split(r'\s*ESCALA\s+DE\s+SERVIÇO', nome_setor, 1, re.IGNORECASE)[0].strip()
 
                 for table in tables:
                     header = {}
@@ -1183,6 +1179,7 @@ def processar_pagina_pdf(b64_content, page_info=""):
                                 elif "CARGO" in col_clean: header["cargo"] = i
                                 elif "VÍNCULO" in col_clean or "VINCULO" in col_clean: header["vinculo"] = i
                                 elif "CRM" in col_clean or "CONSELHO" in col_clean: header["crm"] = i
+                                elif "MATRÍCULA" in col_clean or "MATRICULA" in col_clean: header["matricula"] = i
                                 elif re.fullmatch(r"\d{1,2}", col_clean): header[int(col_clean)] = i
                             continue
 
@@ -1190,12 +1187,13 @@ def processar_pagina_pdf(b64_content, page_info=""):
                             continue
 
                         nome = str(row[header["nome"]]).replace('\n', ' ').strip()
-                        crm = str(row[header.get("crm", -1)] or "").strip()
-                        cargo = str(row[header.get("cargo", -1)] or "").strip()
-                        vinculo = str(row[header.get("vinculo", -1)] or "").strip()
+                        crm = str(row[header.get("crm", -1)] or "").replace('\n', ' ').strip()
+                        cargo = str(row[header.get("cargo", -1)] or "").replace('\n', ' ').strip()
+                        vinculo = str(row[header.get("vinculo", -1)] or "").replace('\n', ' ').strip()
+                        matricula = str(row[header.get("matricula", -1)] or "").replace('\n', ' ').strip()
 
-                        texto_concat = f"{nome} {crm} {cargo} {vinculo}".upper()
-                        if "PAES" not in texto_concat:
+                        texto_alvo = f"{vinculo} {matricula}".upper()
+                        if "PAES" not in texto_alvo:
                             continue
 
                         plantoes = []
@@ -1281,4 +1279,5 @@ async def normaliza_escala_maternidade_matricial(request: Request):
 
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
+
 # --- FIM normaliza-ESCALA-MATRIZ ---
