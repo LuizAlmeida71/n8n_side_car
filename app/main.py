@@ -611,7 +611,7 @@ def dedup_plantao(plantoes):
     return result
 
 @app.post("/normaliza-escala-MATERNIDADE-MATRICIAL")
-async def normaliza_escala_PACS(request: Request):
+async def normaliza_escala_MATERNIDADE_MATRICIAL(request: Request):
     try:
         body = await request.json()
         all_table_rows = []
