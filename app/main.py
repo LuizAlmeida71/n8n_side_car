@@ -1164,6 +1164,10 @@ def dedup_plantao(plantoes):
             result.append(p)
     return result
 
+
+
+
+
 @app.post("/normaliza-escala-MATERNIDADE-MATRICIAL")
 async def normaliza_escala_MATERNIDADE_MATRICIAL(request: Request):
     try:
@@ -1187,15 +1191,30 @@ async def normaliza_escala_MATERNIDADE_MATRICIAL(request: Request):
                         continue
 
                     nome_unidade = unidade_match.group(1).strip() if unidade_match else "NÃO INFORMADO"
-                    # Extração do setor corrigida para capturar texto que continua na mesma linha
-                    setor_match = re.search(r'(UNIDADE/SETOR|SETOR):\s*([^E]+?)(?=\s*ESCALA\s+DE\s+SERVIÇO|$)', text, re.IGNORECASE)
-                    if not setor_match:
-                        # Fallback: busca até quebra de linha
-                        setor_match = re.search(r'(UNIDADE/SETOR|SETOR):\s*(.*?)\n', text, re.IGNORECASE)
+                    # DEBUG: Vamos ver exatamente o que está no texto
+                    print(f"Texto extraído da página: {text[:500]}...")
                     
-                    nome_setor = setor_match.group(2).strip() if setor_match else "NÃO INFORMADO"
-                    # Limpa espaços extras e normaliza
-                    nome_setor = re.sub(r'\s+', ' ', nome_setor)
+                    # Extração do setor com múltiplas tentativas
+                    nome_setor = "NÃO INFORMADO"
+                    
+                    # Tentativa 1: Regex principal
+                    setor_match = re.search(r'UNIDADE/SETOR:\s*([^\n]+)', text, re.IGNORECASE)
+                    if setor_match:
+                        nome_setor = setor_match.group(1).strip()
+                        print(f"Setor encontrado (tentativa 1): '{nome_setor}'")
+                        # Remove tudo a partir de "ESCALA DE SERVIÇO"
+                        nome_setor = re.split(r'\s*ESCALA\s+DE\s+SERVIÇO', nome_setor, 1, re.IGNORECASE)[0].strip()
+                    else:
+                        # Tentativa 2: Busca por SETOR sozinho
+                        setor_match = re.search(r'SETOR:\s*([^\n]+)', text, re.IGNORECASE)
+                        if setor_match:
+                            nome_setor = setor_match.group(1).strip()
+                            print(f"Setor encontrado (tentativa 2): '{nome_setor}'")
+                            nome_setor = re.split(r'\s*ESCALA\s+DE\s+SERVIÇO', nome_setor, 1, re.IGNORECASE)[0].strip()
+                        else:
+                            print("SETOR NÃO ENCONTRADO!")
+                    
+                    print(f"Setor final: '{nome_setor}'")
 
                     for table in tables:
                         header = {}
@@ -1214,14 +1233,20 @@ async def normaliza_escala_MATERNIDADE_MATRICIAL(request: Request):
                                 continue
 
                             nome = str(row[header["nome"]]).replace('\n', ' ').strip()
+                            print(f"Processando médico: '{nome}'")
+                            
                             crm = str(row[header.get("crm", -1)] or "").strip()
                             cargo = str(row[header.get("cargo", -1)] or "").strip()
                             
-                            # Extração de vínculo melhorada para PAOLA e outros casos
+                            # DEBUG para vínculo
                             vinculo = str(row[header.get("vinculo", -1)] or "").strip()
+                            print(f"Vínculo na coluna: '{vinculo}'")
+                            
                             if not vinculo or vinculo == "None":
                                 # Busca em toda a linha quando não encontra na coluna específica
                                 linha_completa = " ".join(str(cell or '').strip() for cell in row if cell)
+                                print(f"Linha completa: '{linha_completa}'")
+                                
                                 # Padrões mais abrangentes para capturar diferentes formatos
                                 vinculo_patterns = [
                                     r'(RPPAES\s*PJ)',
@@ -1234,11 +1259,17 @@ async def normaliza_escala_MATERNIDADE_MATRICIAL(request: Request):
                                     vinculo_match = re.search(pattern, linha_completa, re.IGNORECASE)
                                     if vinculo_match:
                                         vinculo = vinculo_match.group(1).strip()
+                                        print(f"Vínculo encontrado com pattern '{pattern}': '{vinculo}'")
                                         break
 
+                            print(f"Vínculo final: '{vinculo}'")
+                            
                             # Validação correta do vínculo - deve conter PAES
                             if not vinculo or "PAES" not in vinculo.upper():
+                                print(f"Vínculo rejeitado para {nome}: '{vinculo}'")
                                 continue
+                            
+                            print(f"Vínculo aceito para {nome}: '{vinculo}'")
 
                             plantoes = []
                             for dia in range(1, 32):
