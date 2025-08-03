@@ -554,28 +554,6 @@ async def normaliza_escala_PACS(request: Request):
 
 
 # --- INÍCIO normaliza-MATERNIDADE-MATRICIAL ---
-from fastapi import FastAPI, UploadFile, File, Request
-from fastapi.responses import JSONResponse
-from openpyxl import Workbook, load_workbook
-import tempfile
-import fitz  # PyMuPDF
-import base64
-import os
-import io
-from fpdf import FPDF
-import traceback
-from collections import defaultdict
-import re
-import traceback
-from datetime import datetime, timedelta
-import textwrap
-from fpdf import FPDF
-import hashlib
-import logging
-import pdfplumber
-from typing import List
-
-app = FastAPI()
 
 # Caminho da fonte para PDF com acentos
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
