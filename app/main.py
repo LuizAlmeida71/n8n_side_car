@@ -1175,7 +1175,145 @@ async def normaliza_escala_MATERNIDADE_MATRICIAL(request: Request):
         body = await request.json()
         profissionais = []
         
-        for item in body:
+        # Verifica se é o formato do split-pdf
+        if isinstance(body, dict) and "pages" in body:
+            # Formato do split-pdf: {"pages": [{"page": 1, "file_base64": "...", "filename": "..."}]}
+            for page_data in body["pages"]:
+                b64 = page_data.get("file_base64")
+                page_number = page_data.get("page", "unknown")
+                filename = page_data.get("filename", "unknown")
+                
+                if not b64:
+                    continue
+                
+                print(f"Processando página {page_number} do arquivo {filename}")
+                
+                pdf_bytes = base64.b64decode(b64)
+                with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+                    print(f"PDF página {page_number} tem {len(pdf.pages)} páginas internas")
+                    
+                    for internal_page_num, page in enumerate(pdf.pages):
+                        print(f"=== PROCESSANDO PÁGINA {page_number}-{internal_page_num + 1} ===")
+                        text = page.extract_text() or ""
+                        print(f"Primeiros 200 chars: {text[:200]}...")
+                        
+                        tables = page.extract_tables()
+                        print(f"Página tem {len(tables)} tabelas")
+                        
+                        # DEBUG: Vamos ver exatamente o que está no texto
+                        print(f"=== CABEÇALHO DA PÁGINA {page_number}-{internal_page_num + 1} ===")
+                        linhas_cabecalho = text.split('\n')[:10]  # Primeiras 10 linhas
+                        for i, linha in enumerate(linhas_cabecalho):
+                            print(f"Linha {i+1}: '{linha}'")
+                        
+                        # Processamento da página (mesmo código anterior)
+                        unidade_match = re.search(r'UNIDADE:\s*(.*?)\n', text, re.IGNORECASE)
+                        mes, ano = parse_mes_ano(text)
+
+                        if not mes or not ano:
+                            continue
+
+                        nome_unidade = unidade_match.group(1).strip() if unidade_match else "NÃO INFORMADO"
+                        
+                        # Tentativa 1: Regex principal
+                        setor_match = re.search(r'UNIDADE/SETOR:\s*([^\n]+)', text, re.IGNORECASE)
+                        if setor_match:
+                            nome_setor = setor_match.group(1).strip()
+                            print(f"Setor encontrado (tentativa 1): '{nome_setor}'")
+                            # Remove tudo a partir de "ESCALA DE SERVIÇO"
+                            nome_setor = re.split(r'\s*ESCALA\s+DE\s+SERVIÇO', nome_setor, 1, re.IGNORECASE)[0].strip()
+                        else:
+                            # Tentativa 2: Busca por SETOR sozinho
+                            setor_match = re.search(r'SETOR:\s*([^\n]+)', text, re.IGNORECASE)
+                            if setor_match:
+                                nome_setor = setor_match.group(1).strip()
+                                print(f"Setor encontrado (tentativa 2): '{nome_setor}'")
+                                nome_setor = re.split(r'\s*ESCALA\s+DE\s+SERVIÇO', nome_setor, 1, re.IGNORECASE)[0].strip()
+                            else:
+                                print("SETOR NÃO ENCONTRADO!")
+                                nome_setor = "NÃO INFORMADO"
+                        
+                        print(f"Setor final: '{nome_setor}'")
+
+                        for table in tables:
+                            header = {}
+                            for row in table:
+                                if not header and any("NOME" in str(c).upper() for c in row if c):
+                                    for i, col in enumerate(row):
+                                        col_clean = (col or "").strip().upper()
+                                        if "NOME" in col_clean: header["nome"] = i
+                                        elif "CARGO" in col_clean: header["cargo"] = i
+                                        elif "VÍNCULO" in col_clean or "VINCULO" in col_clean: header["vinculo"] = i
+                                        elif "CRM" in col_clean or "CONSELHO" in col_clean: header["crm"] = i
+                                        elif re.fullmatch(r"\d{1,2}", col_clean): header[int(col_clean)] = i
+                                    continue
+
+                                if "nome" not in header or not row or not row[header["nome"]]:
+                                    continue
+
+                                nome = str(row[header["nome"]]).replace('\n', ' ').strip()
+                                print(f"Processando médico: '{nome}'")
+                                
+                                crm = str(row[header.get("crm", -1)] or "").strip()
+                                cargo = str(row[header.get("cargo", -1)] or "").strip()
+                                
+                                # Busca PAES em matrícula ou vínculo
+                                matricula = str(row[header.get("matricula", -1)] or "").strip()
+                                vinculo = str(row[header.get("vinculo", -1)] or "").strip()
+                                
+                                print(f"Matrícula: '{matricula}'")
+                                print(f"Vínculo: '{vinculo}'")
+                                
+                                # Verifica se PAES está em qualquer um dos campos
+                                tem_paes = ("PAES" in matricula.upper()) or ("PAES" in vinculo.upper())
+                                
+                                if not tem_paes:
+                                    # Se não encontrou, busca na linha inteira
+                                    linha_completa = " ".join(str(cell or '').strip() for cell in row if cell)
+                                    tem_paes = "PAES" in linha_completa.upper()
+                                    print(f"Linha completa: '{linha_completa}'")
+                                    print(f"PAES encontrado na linha: {tem_paes}")
+                                
+                                if not tem_paes:
+                                    print(f"Profissional rejeitado - sem PAES: {nome}")
+                                    continue
+                                
+                                print(f"Profissional aceito - tem PAES: {nome}")
+
+                                plantoes = []
+                                for dia in range(1, 32):
+                                    idx = header.get(dia)
+                                    if idx is None or idx >= len(row): continue
+                                    cell = row[idx]
+                                    if not cell: continue
+                                    for turno in interpretar_turno(str(cell)):
+                                        data_plantao = datetime(ano, mes, dia)
+                                        if turno["turno"] == "NOITE (fim)":
+                                            data_plantao += timedelta(days=1)
+                                        horario = HORARIOS_TURNO[turno["turno"]]
+                                        plantoes.append({
+                                            "dia": data_plantao.day,
+                                            "data": data_plantao.strftime("%d/%m/%Y"),
+                                            "turno": turno["turno"],
+                                            "inicio": horario["inicio"],
+                                            "fim": horario["fim"],
+                                            "setor": nome_setor,
+                                            "medico_setor": nome_setor
+                                        })
+
+                                if plantoes:
+                                    profissionais.append({
+                                        "medico_nome": nome,
+                                        "medico_crm": crm,
+                                        "medico_especialidade": cargo,
+                                        "medico_vinculo": vinculo,
+                                        "medico_setor": nome_setor,
+                                        "medico_unidade": nome_unidade,
+                                        "plantoes": dedup_plantao(plantoes)
+                                    })
+        
+        # Se não é formato do split-pdf, tenta formatos antigos
+        elif isinstance(body, list):
             # Verifica se é o novo formato com "data"
             if "data" in item and isinstance(item["data"], list):
                 # Novo formato: {"data": [{"page_number": 1, "bae64": "..."}, ...]}
