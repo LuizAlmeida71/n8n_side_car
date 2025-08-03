@@ -1151,7 +1151,6 @@ def processar_pagina_pdf(b64_content, page_info=""):
             for page in pdf.pages:
                 text = page.extract_text() or ""
                 lines = text.splitlines()
-                # Ignora linha com "Governo do Estado..."
                 lines = [l for l in lines if not l.strip().startswith("Governo do Estado")]
                 text = '\n'.join(lines)
 
@@ -1171,8 +1170,6 @@ def processar_pagina_pdf(b64_content, page_info=""):
                     nome_setor = re.split(r'\s*ESCALA\s+DE\s+SERVIÇO', nome_setor, 1, re.IGNORECASE)[0].strip()
                 else:
                     nome_setor = "NÃO INFORMADO"
-
-                print(f"{page_info} - Setor: '{nome_setor}'")
 
                 for table in tables:
                     header = {}
@@ -1235,5 +1232,4 @@ def processar_pagina_pdf(b64_content, page_info=""):
     except Exception as e:
         print(f"Erro processando {page_info}: {str(e)}")
         return []
-
 # --- FIM normaliza-escala-MATERNIDADE-MATRICIAL ---
