@@ -1086,18 +1086,6 @@ async def normaliza_escala_PACS(request: Request):
 # --- FIM normaliza-escala-PACS ---
 
 # --- INÍCIO normaliza-MATERNIDADE-MATRICIAL ---
-import base64
-import io
-import re
-from datetime import datetime, timedelta
-import traceback
-from collections import defaultdict
-import pdfplumber
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-
-# Supondo que 'app' já foi definido
-# app = FastAPI()
 
 # --- Constantes e Funções Auxiliares (como no seu código) ---
 
