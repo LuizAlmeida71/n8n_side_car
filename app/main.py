@@ -5,6 +5,7 @@ import tempfile
 import fitz  # PyMuPDF
 import base64
 import os
+import io
 from fpdf import FPDF
 import traceback
 from collections import defaultdict
