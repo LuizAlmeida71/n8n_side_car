@@ -61,9 +61,8 @@ async def convert_xlsx_to_json(file: UploadFile = File(...)):
 @app.post("/split-pdf")
 async def split_pdf(file: UploadFile = File(...)):
     try:
-        contents = await file.read()
-
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            contents = await file.read()
             tmp.write(contents)
             tmp_path = tmp.name
 
@@ -74,14 +73,16 @@ async def split_pdf(file: UploadFile = File(...)):
                 single_page = fitz.open()
                 single_page.insert_pdf(doc, from_page=i, to_page=i)
 
-                b64_content = single_page.tobytes()
-                encoded = base64.b64encode(b64_content).decode("utf-8")
+                b64_bytes = single_page.write()  # gera bytes do PDF da página
+                b64_content = base64.b64encode(b64_bytes).decode("utf-8")
 
                 pages_b64.append({
                     "page": i + 1,
-                    "file_base64": encoded,
+                    "file_base64": b64_content,
                     "filename": f"page_{i+1}.pdf"
                 })
+
+                single_page.close()
 
         os.remove(tmp_path)
         return JSONResponse(content={"pages": pages_b64})
@@ -89,8 +90,10 @@ async def split_pdf(file: UploadFile = File(...)):
     except Exception as e:
         if 'tmp_path' in locals() and os.path.exists(tmp_path):
             os.remove(tmp_path)
-        return JSONResponse(content={"error": str(e), "trace": traceback.format_exc()}, status_code=500)
-
+        return JSONResponse(
+            content={"error": str(e), "trace": traceback.format_exc()},
+            status_code=500
+        )
 
 
 
