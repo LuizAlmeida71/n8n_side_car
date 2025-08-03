@@ -712,4 +712,5 @@ async def normaliza_escala_MATERNIDADE_MATRICIAL(request: Request):
     except Exception as e:
         return JSONResponse(content={"error": str(e), "trace": traceback.format_exc()}, status_code=500)
 
+
 # --- FIM normaliza-escala-MATERNIDADE-MATRICIAL ---
