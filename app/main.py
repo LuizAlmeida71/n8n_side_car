@@ -615,6 +615,7 @@ async def normaliza_escala_MATERNIDADE_MATRICIAL(request: Request):
     try:
         body = await request.json()
         profissionais = []
+        all_headers = []
 
         for item in body:
             b64 = item.get("base64") or item.get("bae64")
@@ -628,17 +629,17 @@ async def normaliza_escala_MATERNIDADE_MATRICIAL(request: Request):
                     tables = page.extract_tables()
 
                     unidade = re.search(r'UNIDADE:\s*(.*?)\n', text, re.IGNORECASE)
-                    setor = re.search(r'(UNIDADE/SETOR|SETOR):\s*(.*?)\n', text, re.IGNORECASE)
-                    servico = re.search(r'ESCALA DE SERVIÇO:\s*(.*?)\n', text, re.IGNORECASE)
+                    setor_match = re.search(r'(UNIDADE/SETOR|SETOR):\s*(.*?)\n', text, re.IGNORECASE)
+                    servico_match = re.search(r'ESCALA DE SERVIÇO:\s*(.*?)\n', text, re.IGNORECASE)
                     mes, ano = parse_mes_ano(text)
 
                     if not mes or not ano:
                         continue
 
                     nome_unidade = unidade.group(1).strip() if unidade else "NÃO INFORMADO"
-                    nome_setor = setor.group(2).strip() if setor else "NÃO INFORMADO"
-                    if servico:
-                        nome_setor += f" ESCALA DE SERVIÇO: {servico.group(1).strip()}"
+                    nome_setor = setor_match.group(2).strip() if setor_match else "NÃO INFORMADO"
+                    if "ESCALA DE SERVIÇO" in nome_setor:
+                        nome_setor = nome_setor.split("ESCALA DE SERVIÇO")[0].strip()
 
                     header = {}
                     for table in tables:
