@@ -610,7 +610,7 @@ def dedup_plantao(plantoes):
             result.append(p)
     return result
 
-@app.post("/normaliza-escala-PACS")
+@app.post("/normaliza-escala-MATERNIDADE-MATRICIAL")
 async def normaliza_escala_PACS(request: Request):
     try:
         body = await request.json()
