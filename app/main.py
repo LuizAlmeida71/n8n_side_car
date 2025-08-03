@@ -615,8 +615,6 @@ async def normaliza_escala_MATERNIDADE_MATRICIAL(request: Request):
     try:
         body = await request.json()
         profissionais = []
-        all_headers = []
-
         for item in body:
             b64 = item.get("base64") or item.get("bae64")
             if not b64:
@@ -628,7 +626,7 @@ async def normaliza_escala_MATERNIDADE_MATRICIAL(request: Request):
                     text = page.extract_text() or ""
                     tables = page.extract_tables()
 
-                    unidade = re.search(r'UNIDADE:\s*(.*?)\n', text, re.IGNORECASE)
+                    unidade_match = re.search(r'UNIDADE:\s*(.*?)\n', text, re.IGNORECASE)
                     setor_match = re.search(r'(UNIDADE/SETOR|SETOR):\s*(.*?)\n', text, re.IGNORECASE)
                     servico_match = re.search(r'ESCALA DE SERVIÇO:\s*(.*?)\n', text, re.IGNORECASE)
                     mes, ano = parse_mes_ano(text)
@@ -636,13 +634,12 @@ async def normaliza_escala_MATERNIDADE_MATRICIAL(request: Request):
                     if not mes or not ano:
                         continue
 
-                    nome_unidade = unidade.group(1).strip() if unidade else "NÃO INFORMADO"
+                    nome_unidade = unidade_match.group(1).strip() if unidade_match else "NÃO INFORMADO"
                     nome_setor = setor_match.group(2).strip() if setor_match else "NÃO INFORMADO"
-                    if "ESCALA DE SERVIÇO" in nome_setor:
-                        nome_setor = nome_setor.split("ESCALA DE SERVIÇO")[0].strip()
+                    nome_setor = re.split(r'ESCALA DE SERVIÇO', nome_setor, 1)[0].strip()
 
-                    header = {}
                     for table in tables:
+                        header = {}
                         for row in table:
                             if not header and any("NOME" in str(c).upper() for c in row if c):
                                 for i, col in enumerate(row):
@@ -662,7 +659,7 @@ async def normaliza_escala_MATERNIDADE_MATRICIAL(request: Request):
                             cargo = str(row[header.get("cargo", -1)] or "").strip()
                             vinculo = str(row[header.get("vinculo", -1)] or "").strip()
 
-                            if "PAES" not in vinculo.upper():
+                            if not vinculo or "PAES" not in vinculo.upper():
                                 continue
 
                             plantoes = []
