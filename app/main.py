@@ -1162,12 +1162,21 @@ def processar_pagina_pdf(b64_content, page_info=""):
 
                 nome_unidade = unidade_match.group(1).strip() if unidade_match else "NÃO INFORMADO"
                 
-                # Extração do setor
+                # Extração do setor - debug detalhado que SERÁ executado
+                if "UNIDADE/SETOR:" in text:
+                    print(f"{page_info} - Texto CONTÉM 'UNIDADE/SETOR:'")
+                else:
+                    print(f"{page_info} - Texto NÃO CONTÉM 'UNIDADE/SETOR:'")
+                    print(f"{page_info} - Primeira linha: '{text.split(chr(10))[0] if text else 'VAZIO'}'")
+                
                 setor_match = re.search(r'UNIDADE/SETOR:\s*([^\n]+)', text, re.IGNORECASE)
                 if setor_match:
                     nome_setor = setor_match.group(1).strip()
+                    print(f"{page_info} - Setor ENCONTRADO: '{nome_setor}'")
                     nome_setor = re.split(r'\s*ESCALA\s+DE\s+SERVIÇO', nome_setor, 1, re.IGNORECASE)[0].strip()
+                    print(f"{page_info} - Setor LIMPO: '{nome_setor}'")
                 else:
+                    print(f"{page_info} - REGEX NÃO ENCONTROU setor!")
                     nome_setor = "NÃO INFORMADO"
 
                 print(f"{page_info} - Setor: '{nome_setor}'")
