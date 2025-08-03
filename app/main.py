@@ -1108,7 +1108,31 @@ async def normaliza_escala_PACS(request: Request):
 # --- FIM normaliza-escala-PACS ---
 
 # --- INÍCIO normaliza-MATERNIDADE-MATRICIAL ---
-MONTH_MAP = {
+else:
+                # Formato antigo: {"base64": "..." ou "bae64": "..."}
+                b64 = item.get("base64") or item.get("bae64")
+                if not b64:
+                    continue
+                
+                print(f"Processando item no formato antigo")
+                
+                pdf_bytes = base64.b64decode(b64)
+                with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+                    print(f"PDF tem {len(pdf.pages)} páginas")
+                    
+                    for page_num, page in enumerate(pdf.pages):
+                        print(f"=== PROCESSANDO PÁGINA {page_num + 1} ===")
+                        text = page.extract_text() or ""
+                        print(f"Primeiros 200 chars: {text[:200]}...")
+                        
+                        tables = page.extract_tables()
+                        print(f"Página tem {len(tables)} tabelas")
+                        
+                        # DEBUG: Vamos ver exatamente o que está no texto
+                        print(f"=== CABEÇALHO DA PÁGINA {page_num + 1} ===")
+                        linhas_cabecalho = text.split('\n')[:10]  # Primeiras 10 linhas
+                        for i, linha in enumerate(linhas_cabecalho):
+                            print(f"Linha {i+1}: '{linha}'")MONTH_MAP = {
     'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
     'JUNHO': 6, 'JULHO': 7, 'AGOSTO': 8, 'SETEMBRO': 9, 'OUTUBRO': 10,
     'NOVEMBRO': 11, 'DEZEMBRO': 12
@@ -1164,27 +1188,41 @@ def dedup_plantao(plantoes):
             result.append(p)
     return result
 
+
+
+
+
 @app.post("/normaliza-escala-MATERNIDADE-MATRICIAL")
 async def normaliza_escala_MATERNIDADE_MATRICIAL(request: Request):
     try:
         body = await request.json()
         profissionais = []
+        
         for item in body:
-            b64 = item.get("base64") or item.get("bae64")
-            if not b64:
-                continue
-
-            pdf_bytes = base64.b64decode(b64)
-            with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-                print(f"PDF tem {len(pdf.pages)} páginas")
-                
-                for page_num, page in enumerate(pdf.pages):
-                    print(f"=== PROCESSANDO PÁGINA {page_num + 1} ===")
-                    text = page.extract_text() or ""
-                    print(f"Primeiros 200 chars da página {page_num + 1}: {text[:200]}...")
+            # Verifica se é o novo formato com "data"
+            if "data" in item and isinstance(item["data"], list):
+                # Novo formato: {"data": [{"page_number": 1, "bae64": "..."}, ...]}
+                for page_data in item["data"]:
+                    b64 = page_data.get("base64") or page_data.get("bae64")
+                    page_number = page_data.get("page_number", "unknown")
+                    filename = page_data.get("filename", "unknown")
                     
-                    tables = page.extract_tables()
-                    print(f"Página {page_num + 1} tem {len(tables)} tabelas")
+                    if not b64:
+                        continue
+                    
+                    print(f"Processando página {page_number} do arquivo {filename}")
+                    
+                    pdf_bytes = base64.b64decode(b64)
+                    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+                        print(f"PDF página {page_number} tem {len(pdf.pages)} páginas internas")
+                        
+                        for internal_page_num, page in enumerate(pdf.pages):
+                            print(f"=== PROCESSANDO PÁGINA {page_number}-{internal_page_num + 1} ===")
+                            text = page.extract_text() or ""
+                            print(f"Primeiros 200 chars: {text[:200]}...")
+                            
+                            tables = page.extract_tables()
+                            print(f"Página tem {len(tables)} tabelas")
 
                     unidade_match = re.search(r'UNIDADE:\s*(.*?)\n', text, re.IGNORECASE)
                     mes, ano = parse_mes_ano(text)
