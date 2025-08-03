@@ -1164,10 +1164,6 @@ def dedup_plantao(plantoes):
             result.append(p)
     return result
 
-
-
-
-
 @app.post("/normaliza-escala-MATERNIDADE-MATRICIAL")
 async def normaliza_escala_MATERNIDADE_MATRICIAL(request: Request):
     try:
@@ -1180,9 +1176,15 @@ async def normaliza_escala_MATERNIDADE_MATRICIAL(request: Request):
 
             pdf_bytes = base64.b64decode(b64)
             with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-                for page in pdf.pages:
+                print(f"PDF tem {len(pdf.pages)} páginas")
+                
+                for page_num, page in enumerate(pdf.pages):
+                    print(f"=== PROCESSANDO PÁGINA {page_num + 1} ===")
                     text = page.extract_text() or ""
+                    print(f"Primeiros 200 chars da página {page_num + 1}: {text[:200]}...")
+                    
                     tables = page.extract_tables()
+                    print(f"Página {page_num + 1} tem {len(tables)} tabelas")
 
                     unidade_match = re.search(r'UNIDADE:\s*(.*?)\n', text, re.IGNORECASE)
                     mes, ano = parse_mes_ano(text)
@@ -1192,7 +1194,10 @@ async def normaliza_escala_MATERNIDADE_MATRICIAL(request: Request):
 
                     nome_unidade = unidade_match.group(1).strip() if unidade_match else "NÃO INFORMADO"
                     # DEBUG: Vamos ver exatamente o que está no texto
-                    print(f"Texto extraído da página: {text[:500]}...")
+                    print(f"=== CABEÇALHO DA PÁGINA {page_num + 1} ===")
+                    linhas_cabecalho = text.split('\n')[:10]  # Primeiras 10 linhas
+                    for i, linha in enumerate(linhas_cabecalho):
+                        print(f"Linha {i+1}: '{linha}'")
                     
                     # Extração do setor com múltiplas tentativas
                     nome_setor = "NÃO INFORMADO"
