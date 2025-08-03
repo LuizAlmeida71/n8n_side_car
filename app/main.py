@@ -554,6 +554,15 @@ async def normaliza_escala_PACS(request: Request):
 
 
 # --- INÍCIO normaliza-MATERNIDADE-MATRICIAL ---
+import re
+import base64
+import io
+import traceback
+from datetime import datetime, timedelta
+import pdfplumber
+from fastapi import Request
+from fastapi.responses import JSONResponse
+
 MONTH_MAP = {
     'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
     'JUNHO': 6, 'JULHO': 7, 'AGOSTO': 8, 'SETEMBRO': 9, 'OUTUBRO': 10,
@@ -669,10 +678,15 @@ async def normaliza_escala_MATERNIDADE_MATRICIAL(request: Request):
                             cargo = str(row[header.get("cargo", -1)] or "").strip()
                             vinculo = str(row[header.get("vinculo", -1)] or "").strip()
 
-                            # Filtro mais inclusivo para vínculos
-                            vinculos_aceitos = ["PAES", "PJ", "EFETIVO", "TSI", "MW", "RPPAES", "R.P.", "SELETIVO"]
-                            if not vinculo or not any(termo in vinculo.upper() for termo in vinculos_aceitos):
+                            # DEBUG: Verificar vínculo
+                            print(f"DEBUG - Nome: {nome}, Vínculo: '{vinculo}', Contém PAES: {'PAES' in vinculo.upper()}")
+
+                            # APENAS vínculos que contenham PAES
+                            if not vinculo or "PAES" not in vinculo.upper():
+                                print(f"DEBUG - Excluindo {nome} com vínculo '{vinculo}'")
                                 continue
+                            
+                            print(f"DEBUG - Incluindo {nome} com vínculo '{vinculo}'")
 
                             plantoes = []
                             for dia in range(1, 32):
