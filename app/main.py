@@ -1107,8 +1107,6 @@ async def normaliza_escala_PACS(request: Request):
 
 # --- FIM normaliza-escala-PACS ---
 
-
-
 # --- INÍCIO normaliza-MATERNIDADE-MATRICIAL ---
 MONTH_MAP = {
     'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
@@ -1228,8 +1226,8 @@ async def normaliza_escala_MATERNIDADE_MATRICIAL(request: Request):
                                 if vinculo_match:
                                     vinculo = vinculo_match.group(1).strip()
 
-                            # Validação mais flexível do vínculo
-                            if not vinculo or not any(term in vinculo.upper() for term in ["PAES", "PJ"]):
+                            # Validação correta do vínculo - deve conter PAES
+                            if not vinculo or "PAES" not in vinculo.upper():
                                 continue
 
                             plantoes = []
