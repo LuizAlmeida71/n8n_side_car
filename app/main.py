@@ -635,8 +635,18 @@ async def normaliza_escala_MATERNIDADE_MATRICIAL(request: Request):
                         continue
 
                     nome_unidade = unidade_match.group(1).strip() if unidade_match else "NÃO INFORMADO"
-                    nome_setor = setor_match.group(2).strip() if setor_match else "NÃO INFORMADO"
-                    nome_setor = re.split(r'ESCALA DE SERVIÇO', nome_setor, 1)[0].strip()
+                    
+                    # Melhor extração do setor
+                    if setor_match:
+                        nome_setor = setor_match.group(2).strip()
+                        # Remove tudo após "ESCALA DE SERVIÇO" se existir
+                        nome_setor = re.split(r'\s+ESCALA\s+DE\s+SERVIÇO', nome_setor, 1)[0].strip()
+                        # Remove barras e espaços extras no final, mas mantém estrutura
+                        nome_setor = re.sub(r'\s+', ' ', nome_setor).strip()
+                        # Remove caracteres especiais no final
+                        nome_setor = re.sub(r'[/\s]+$', '', nome_setor)
+                    else:
+                        nome_setor = "NÃO INFORMADO"
 
                     for table in tables:
                         header = {}
@@ -659,7 +669,9 @@ async def normaliza_escala_MATERNIDADE_MATRICIAL(request: Request):
                             cargo = str(row[header.get("cargo", -1)] or "").strip()
                             vinculo = str(row[header.get("vinculo", -1)] or "").strip()
 
-                            if not vinculo or "PAES" not in vinculo.upper():
+                            # Filtro mais inclusivo para vínculos
+                            vinculos_aceitos = ["PAES", "PJ", "EFETIVO", "TSI", "MW", "RPPAES", "R.P.", "SELETIVO"]
+                            if not vinculo or not any(termo in vinculo.upper() for termo in vinculos_aceitos):
                                 continue
 
                             plantoes = []
@@ -704,5 +716,4 @@ async def normaliza_escala_MATERNIDADE_MATRICIAL(request: Request):
 
     except Exception as e:
         return JSONResponse(content={"error": str(e), "trace": traceback.format_exc()}, status_code=500)
-
 # --- FIM normaliza-escala-MATERNIDADE-MATRICIAL ---
