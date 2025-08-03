@@ -554,15 +554,6 @@ async def normaliza_escala_PACS(request: Request):
 
 
 # --- INÍCIO normaliza-MATERNIDADE-MATRICIAL ---
-import re
-import base64
-import io
-import traceback
-from datetime import datetime, timedelta
-import pdfplumber
-from fastapi import Request
-from fastapi.responses import JSONResponse
-
 MONTH_MAP = {
     'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
     'JUNHO': 6, 'JULHO': 7, 'AGOSTO': 8, 'SETEMBRO': 9, 'OUTUBRO': 10,
@@ -644,18 +635,8 @@ async def normaliza_escala_MATERNIDADE_MATRICIAL(request: Request):
                         continue
 
                     nome_unidade = unidade_match.group(1).strip() if unidade_match else "NÃO INFORMADO"
-                    
-                    # Melhor extração do setor
-                    if setor_match:
-                        nome_setor = setor_match.group(2).strip()
-                        # Remove tudo após "ESCALA DE SERVIÇO" se existir
-                        nome_setor = re.split(r'\s+ESCALA\s+DE\s+SERVIÇO', nome_setor, 1)[0].strip()
-                        # Remove barras e espaços extras no final, mas mantém estrutura
-                        nome_setor = re.sub(r'\s+', ' ', nome_setor).strip()
-                        # Remove caracteres especiais no final
-                        nome_setor = re.sub(r'[/\s]+$', '', nome_setor)
-                    else:
-                        nome_setor = "NÃO INFORMADO"
+                    nome_setor = setor_match.group(2).strip() if setor_match else "NÃO INFORMADO"
+                    nome_setor = re.split(r'ESCALA DE SERVIÇO', nome_setor, 1)[0].strip()
 
                     for table in tables:
                         header = {}
@@ -678,15 +659,15 @@ async def normaliza_escala_MATERNIDADE_MATRICIAL(request: Request):
                             cargo = str(row[header.get("cargo", -1)] or "").strip()
                             vinculo = str(row[header.get("vinculo", -1)] or "").strip()
 
-                            # DEBUG: Verificar vínculo
-                            print(f"DEBUG - Nome: {nome}, Vínculo: '{vinculo}', Contém PAES: {'PAES' in vinculo.upper()}")
+                            # Corrige erro de vinculação ausente em linhas quebradas (Paola)
+                            if not vinculo:
+                                vinculo_joined = " ".join(str(cell or '').strip() for cell in row)
+                                vinculo = re.search(r'(PAES.*?)\s', vinculo_joined.upper())
+                                if vinculo:
+                                    vinculo = vinculo.group(1)
 
-                            # APENAS vínculos que contenham PAES
                             if not vinculo or "PAES" not in vinculo.upper():
-                                print(f"DEBUG - Excluindo {nome} com vínculo '{vinculo}'")
                                 continue
-                            
-                            print(f"DEBUG - Incluindo {nome} com vínculo '{vinculo}'")
 
                             plantoes = []
                             for dia in range(1, 32):
@@ -730,4 +711,5 @@ async def normaliza_escala_MATERNIDADE_MATRICIAL(request: Request):
 
     except Exception as e:
         return JSONResponse(content={"error": str(e), "trace": traceback.format_exc()}, status_code=500)
+
 # --- FIM normaliza-escala-MATERNIDADE-MATRICIAL ---
