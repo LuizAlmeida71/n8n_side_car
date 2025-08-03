@@ -1085,6 +1085,19 @@ async def normaliza_escala_PACS(request: Request):
 
 # --- FIM normaliza-escala-PACS ---
 
+
+
+# --- INÍCIO normaliza-ESCALA-MATRIZ ---
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+import base64
+import io
+import re
+from datetime import datetime, timedelta
+import pdfplumber
+
+app = FastAPI()
+
 MONTH_MAP = {
     'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
     'JUNHO': 6, 'JULHO': 7, 'AGOSTO': 8, 'SETEMBRO': 9, 'OUTUBRO': 10,
@@ -1156,50 +1169,48 @@ def dedup_plantao(plantoes):
             result.append(p)
     return result
 
-def processar_pagina_pdf(b64_content, page_info="", setor_anterior=None):
+def processar_pagina_pdf(b64_content, page_info=""):
     """
-    Processa uma página do PDF, com opção de usar setor da página anterior
+    Processa uma página do PDF como uma escala independente
     """
     try:
         pdf_bytes = base64.b64decode(b64_content)
         profissionais = []
-        setor_encontrado = None
 
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-            for page in pdf.pages:
+            for page_num, page in enumerate(pdf.pages):
                 text = page.extract_text() or ""
                 lines = text.splitlines()
+                
+                # Remover linha do cabeçalho do governo se existir
                 lines = [l for l in lines if not l.strip().startswith("Governo do Estado")]
                 text = '\n'.join(lines)
 
-                tables = page.extract_tables()
-
                 # Extrair informações do cabeçalho
-                unidade_match = re.search(r'UNIDADE: ?\s*([^\n]+)', text, re.IGNORECASE)
+                unidade_match = re.search(r'UNIDADE:\s*([^\n]+)', text, re.IGNORECASE)
                 nome_unidade = unidade_match.group(1).strip() if unidade_match else "NÃO INFORMADO"
                 
-                # Usar a função melhorada para extrair setor
+                # Extrair setor
                 nome_setor = extrair_setor(text, lines)
-                
-                # Se não encontrou setor e tem setor anterior, usar o anterior
-                if not nome_setor and setor_anterior:
-                    nome_setor = setor_anterior
-                elif not nome_setor:
+                if not nome_setor:
                     nome_setor = "NÃO INFORMADO"
+                    print(f"AVISO: Setor não encontrado em {page_info}, página {page_num + 1}")
                 
-                # Guardar o setor encontrado para retornar
-                setor_encontrado = nome_setor if nome_setor != "NÃO INFORMADO" else None
-
+                # Extrair mês e ano
                 mes, ano = parse_mes_ano(text)
                 if not mes or not ano:
+                    print(f"AVISO: Mês/Ano não encontrado em {page_info}, página {page_num + 1}")
                     continue
 
-                # Debug: imprimir informações encontradas
-                print(f"Página {page_info}: Setor = {nome_setor}, Unidade = {nome_unidade}")
+                print(f"Processando {page_info}, página {page_num + 1}: Unidade={nome_unidade}, Setor={nome_setor}, Mês={mes}/{ano}")
 
-                for table in tables:
+                # Processar tabelas
+                tables = page.extract_tables()
+                
+                for table_num, table in enumerate(tables):
                     header = {}
                     for row in table:
+                        # Detectar cabeçalho da tabela
                         if not header and any("NOME" in str(c).upper() for c in row if c):
                             for i, col in enumerate(row):
                                 col_clean = (col or "").strip().upper()
@@ -1211,25 +1222,35 @@ def processar_pagina_pdf(b64_content, page_info="", setor_anterior=None):
                                 elif re.fullmatch(r"\d{1,2}", col_clean): header[int(col_clean)] = i
                             continue
 
+                        # Se não tem cabeçalho definido ou não tem nome, pular
                         if "nome" not in header or not row or not row[header["nome"]]:
                             continue
 
+                        # Extrair dados do profissional
                         nome = str(row[header["nome"]]).replace('\n', ' ').strip()
+                        
+                        # Verificar se chegamos em "SERVIDOR QUE ESTA FORA DA ESCALA"
+                        if "SERVIDOR QUE ESTA FORA DA ESCALA" in nome.upper():
+                            break  # Parar de processar esta tabela
+                        
                         crm = str(row[header.get("crm", -1)] or "").replace('\n', ' ').strip()
                         cargo = str(row[header.get("cargo", -1)] or "").replace('\n', ' ').strip()
                         vinculo = str(row[header.get("vinculo", -1)] or "").replace('\n', ' ').strip()
                         matricula = str(row[header.get("matricula", -1)] or "").replace('\n', ' ').strip()
 
-                        texto_alvo = f"{vinculo} {matricula}".upper()
-                        if "PAES" not in texto_alvo:
+                        # Verificar se é médico PAES
+                        texto_vinculo = str(vinculo).upper()
+                        if "PAES" not in texto_vinculo:
                             continue
 
+                        # Processar plantões
                         plantoes = []
                         for dia in range(1, 32):
                             idx = header.get(dia)
                             if idx is None or idx >= len(row): continue
                             cell = row[idx]
                             if not cell: continue
+                            
                             for turno in interpretar_turno(str(cell)):
                                 data_plantao = datetime(ano, mes, dia)
                                 if turno["turno"] == "NOITE (fim)":
@@ -1256,54 +1277,66 @@ def processar_pagina_pdf(b64_content, page_info="", setor_anterior=None):
                                 "plantoes": dedup_plantao(plantoes)
                             })
 
-        return profissionais, setor_encontrado
+        return profissionais
     except Exception as e:
         print(f"Erro processando {page_info}: {str(e)}")
-        return [], None
+        return []
 
 @app.post("/normaliza-escala-MATERNIDADE-MATRICIAL")
 async def normaliza_escala_maternidade_matricial(request: Request):
     try:
         body = await request.json()
-        profissionais = []
-        setor_atual = None
+        todos_profissionais = []
 
         if isinstance(body, dict) and "pages" in body:
             for page_data in body["pages"]:
                 b64 = page_data.get("file_base64")
                 page_number = page_data.get("page", "unknown")
                 if b64:
-                    profs, setor = processar_pagina_pdf(b64, f"Página {page_number}", setor_atual)
-                    profissionais.extend(profs)
-                    # Atualizar setor_atual se encontrou um novo
-                    if setor:
-                        setor_atual = setor
+                    profs = processar_pagina_pdf(b64, f"PDF página {page_number}")
+                    todos_profissionais.extend(profs)
 
         elif isinstance(body, list):
-            for item in body:
+            for idx, item in enumerate(body):
                 if "data" in item and isinstance(item["data"], list):
                     for page_data in item["data"]:
                         b64 = page_data.get("base64") or page_data.get("bae64")
                         page_number = page_data.get("page_number", "unknown")
                         if b64:
-                            profs, setor = processar_pagina_pdf(b64, f"Página {page_number}", setor_atual)
-                            profissionais.extend(profs)
-                            if setor:
-                                setor_atual = setor
+                            profs = processar_pagina_pdf(b64, f"Item {idx+1}, página {page_number}")
+                            todos_profissionais.extend(profs)
                 else:
                     b64 = item.get("base64") or item.get("bae64")
                     if b64:
-                        profs, setor = processar_pagina_pdf(b64, "Página única", setor_atual)
-                        profissionais.extend(profs)
-                        if setor:
-                            setor_atual = setor
+                        profs = processar_pagina_pdf(b64, f"Item {idx+1}")
+                        todos_profissionais.extend(profs)
 
-        profissionais.sort(key=lambda p: p["medico_nome"])
+        # Agrupar por médico para consolidar diferentes escalas
+        medicos_consolidados = {}
+        for prof in todos_profissionais:
+            nome = prof["medico_nome"]
+            if nome not in medicos_consolidados:
+                medicos_consolidados[nome] = []
+            medicos_consolidados[nome].append(prof)
+        
+        # Criar lista final mantendo escalas separadas para cada médico
+        profissionais_final = []
+        for nome, escalas in medicos_consolidados.items():
+            if len(escalas) == 1:
+                # Médico aparece em apenas uma escala
+                profissionais_final.append(escalas[0])
+            else:
+                # Médico aparece em múltiplas escalas - manter separado por setor
+                for escala in escalas:
+                    profissionais_final.append(escala)
+        
+        profissionais_final.sort(key=lambda p: (p["medico_nome"], p["medico_setor"]))
 
+        # Determinar mês/ano da escala
         mes_nome_str = "JUNHO"
         ano = 2025
-        if profissionais:
-            primeiro_plantao = profissionais[0]["plantoes"][0] if profissionais[0]["plantoes"] else None
+        if profissionais_final:
+            primeiro_plantao = profissionais_final[0]["plantoes"][0] if profissionais_final[0]["plantoes"] else None
             if primeiro_plantao:
                 data_parts = primeiro_plantao["data"].split("/")
                 mes = int(data_parts[1])
@@ -1313,7 +1346,7 @@ async def normaliza_escala_maternidade_matricial(request: Request):
         return JSONResponse(content=[{
             "unidade_escala": "MISTA",
             "mes_ano_escala": f"{mes_nome_str}/{ano}",
-            "profissionais": profissionais
+            "profissionais": profissionais_final
         }])
 
     except Exception as e:
