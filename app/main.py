@@ -389,6 +389,7 @@ async def normaliza_escala_PACS(request: Request):
 # --- FIM normaliza-escala-PACS ---
 
 # --- INÍCIO normaliza-ESCALA-MATRIZ ---
+
 MONTH_MAP = {
     'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
     'JUNHO': 6, 'JULHO': 7, 'AGOSTO': 8, 'SETEMBRO': 9, 'OUTUBRO': 10,
@@ -402,14 +403,13 @@ HORARIOS_TURNO = {
     "NOITE (fim)": {"inicio": "01:00", "fim": "07:00"},
 }
 
-# Lista de profissionais da RP PAES como âncora
 PROFISSIONAIS_ANCHOR = [
-    {"medico_nome": "MARCO ANTÔNIO LEAL SANTOS", "medico_setor": "CAMED/BLOCOS/ISOLAMENTO/UTIN/UCINco/UCINca", "medico_unidade": "HMINSN"},
-    {"medico_nome": "MOACIR BARBOSA NETO", "medico_setor": "CAMED/BLOCOS/ISOLAMENTO/UTIN/UCINco/UCINca", "medico_unidade": "HMINSN"},
-    {"medico_nome": "ROBERTO ANDRADE LIMA", "medico_setor": "CAMED/BLOCOS/ISOLAMENTO/UTIN/UCINco/UCINca", "medico_unidade": "HMINSN"},
-    {"medico_nome": "MARYCASSIELY RODRIGUES TIZOLIM", "medico_setor": "NIR/ISOLAMENTO/BLOCOS/UTIN/UTIM", "medico_unidade": "HMINSN"},
-    {"medico_nome": "CIBELE LOUSANE PINHO MOTA", "medico_setor": "NIR/ISOLAMENTO/BLOCOS/UTIN/UTIM", "medico_unidade": "HMINSN"},
-    {"medico_nome": "MANOEL MESSIAS DOS SANTOS NETO", "medico_setor": "NIR/ISOLAMENTO/BLOCOS/UTIN/UTIM", "medico_unidade": "HMINSN"}
+    {"medico_nome": "MARCO ANTÔNIO LEAL SANTOS"},
+    {"medico_nome": "MOACIR BARBOSA NETO"},
+    {"medico_nome": "ROBERTO ANDRADE LIMA"},
+    {"medico_nome": "MARYCASSIELY RODRIGUES TIZOLIM"},
+    {"medico_nome": "CIBELE LOUSANE PINHO MOTA"},
+    {"medico_nome": "MANOEL MESSIAS DOS SANTOS NETO"}
 ]
 
 def parse_mes_ano(text):
@@ -421,29 +421,17 @@ def parse_mes_ano(text):
     return MONTH_MAP.get(mes_nome.upper()), int(ano_str)
 
 def extrair_setor_e_unidade(text, lines, table_data=None):
-    """
-    Extrai setor e unidade do texto com robustez aprimorada.
-    """
-    text_normalized = text.upper().replace('Ç', 'C').replace('Á', 'A').replace('É', 'E').replace('Í', 'I').replace('Ó', 'O').replace('Ú', 'U')
+    text_normalized = text.upper()
     nome_unidade = "NÃO INFORMADO"
     nome_setor = "NÃO INFORMADO"
-
-    # Mapeamento de abreviações
     UNIDADE_ABREVIACOES = {
         "HMINSN": "HOSPITAL MATERNO INFANTIL NOSSA SENHORA DE NAZARETH"
     }
-
-    # Padrões de extração
     pattern_unidade = r'UNIDADE:\s*([^\n]*(?:\n\s*[^\n]*)*?)'
-    pattern_setor = r'UNIDADE/SETOR:\s*([^(\n]*(?:\n\s*[^(\n]*)*?)(?=\s*(ESCALA\s+DE\s+(SERVIÇO|SERVICO):|\n\s*NOME|\Z))'
+    pattern_setor = r'UNIDADE/SETOR:\s*([^(\n]*(?:\n\s*[^(\n]*)*?)'
 
-    # Depuração das linhas
-    print(f"Linhas processadas: {lines}")
-
-    # Verificar todas as linhas
-    for i, line in enumerate(lines):
-        line_normalized = line.upper().replace('Ç', 'C').replace('Á', 'A').replace('É', 'E').replace('Í', 'I').replace('Ó', 'O').replace('Ú', 'U')
-        print(f"Linha {i}: {line_normalized}")
+    for line in lines:
+        line_normalized = line.upper()
         unidade_match = re.search(pattern_unidade, line_normalized, re.IGNORECASE)
         if unidade_match:
             nome_unidade = unidade_match.group(1).strip()
@@ -451,11 +439,9 @@ def extrair_setor_e_unidade(text, lines, table_data=None):
         setor_match = re.search(pattern_setor, line_normalized, re.IGNORECASE)
         if setor_match:
             nome_setor = setor_match.group(1).strip()
-            nome_setor = re.sub(r'\s*(ESCALA\s+DE\s+(SERVIÇO|SERVICO):.*|\Z)', '', nome_setor).strip()
         if nome_setor != "NÃO INFORMADO" and nome_unidade != "NÃO INFORMADO":
             break
 
-    # Fallback para texto completo
     if nome_unidade == "NÃO INFORMADO":
         unidade_match = re.search(pattern_unidade, text_normalized, re.IGNORECASE | re.DOTALL)
         if unidade_match:
@@ -465,26 +451,16 @@ def extrair_setor_e_unidade(text, lines, table_data=None):
         setor_match = re.search(pattern_setor, text_normalized, re.IGNORECASE | re.DOTALL)
         if setor_match:
             nome_setor = setor_match.group(1).strip()
-            nome_setor = re.sub(r'\s*(ESCALA\s+DE\s+(SERVIÇO|SERVICO):.*|\Z)', '', nome_setor).strip()
 
-    # Fallback aprimorado: Inferir a partir de abreviações ou tabela
     if nome_unidade == "NÃO INFORMADO" and any(abrev in text_normalized for abrev in UNIDADE_ABREVIACOES):
         for abrev, unidade in UNIDADE_ABREVIACOES.items():
             if abrev in text_normalized:
                 nome_unidade = unidade
                 break
     if nome_setor == "NÃO INFORMADO" and table_data and len(table_data) > 0:
-        header_text = " ".join(str(cell or "").strip().upper() for cell in table_data[0][:5] if cell)  # Ampliar para 5 colunas
-        if "CENTRO OBSTETRICO" in header_text or "OBSTETRICIA" in header_text or "GINECOLOGIA" in header_text:
-            nome_setor = "CENTRO OBSTETRICO/ ORQUIDEAS"
-        elif "TRIAGEM" in header_text:
-            nome_setor = "TRIAGEM"
-        elif "CAMED" in header_text:
+        header_text = " ".join(str(cell or "").strip().upper() for cell in table_data[0][:5] if cell)
+        if "CAMED" in header_text or "ISOLAMENTO" in header_text:
             nome_setor = "CAMED/BLOCOS/ISOLAMENTO/UTIN/UCINco/UCINca"
-        elif "ISOLAMENTO" in header_text:
-            nome_setor = "CAMED/BLOCOS/ISOLAMENTO/UTIN/UCINco/UCINca"
-
-    print(f"Extraído - Unidade: {nome_unidade}, Setor: {nome_setor} (Texto extraído: {text[:500]}...)")  # Mais contexto
     return nome_unidade, nome_setor
 
 def interpretar_turno(token):
@@ -519,33 +495,18 @@ def processar_pagina_pdf(b64_content, page_info=""):
     try:
         pdf_bytes = base64.b64decode(b64_content)
         profissionais = []
-
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             for page_num, page in enumerate(pdf.pages):
                 tables = page.extract_tables()
                 text = page.extract_text() or ""
-                lines = text.splitlines()
-                lines = [l for l in lines if not l.strip().startswith("Governo do Estado")]
+                lines = [l for l in text.splitlines() if not l.strip().startswith("Governo do Estado")]
                 text = '\n'.join(lines)
-
-                # Extrair unidade e setor
                 nome_unidade, nome_setor = extrair_setor_e_unidade(text, lines, tables[0] if tables else None)
-                if nome_setor == "NÃO INFORMADO":
-                    print(f"AVISO: Setor não encontrado em {page_info}, página {page_num + 1}")
-                if nome_unidade == "NÃO INFORMADO":
-                    print(f"AVISO: Unidade não encontrada em {page_info}, página {page_num + 1}")
-
-                # Extrair mês e ano
                 mes, ano = parse_mes_ano(text)
                 if not mes or not ano:
-                    print(f"AVISO: Mês/Ano não encontrado em {page_info}, página {page_num + 1}")
                     continue
-
-                print(f"Processando {page_info}, página {page_num + 1}: Unidade={nome_unidade}, Setor={nome_setor}, Mês={mes}/{ano}")
-
-                # Processar tabelas
                 if tables:
-                    for table_num, table in enumerate(tables):
+                    for table in tables:
                         header = {}
                         for row_idx, row in enumerate(table):
                             if not header and any("NOME" in str(c).upper() for c in row if c):
@@ -561,8 +522,6 @@ def processar_pagina_pdf(b64_content, page_info=""):
                             if "nome" not in header or not row or not row[header["nome"]]:
                                 continue
                             nome = str(row[header["nome"]]).replace('\n', ' ').strip()
-                            if "SERVIDOR QUE ESTA FORA DA ESCALA" in nome.upper():
-                                break
                             crm = str(row[header.get("crm", -1)] or "").replace('\n', ' ').strip()
                             cargo = str(row[header.get("cargo", -1)] or "").replace('\n', ' ').strip()
                             vinculo = str(row[header.get("vinculo", -1)] or "").replace('\n', ' ').strip()
@@ -586,8 +545,8 @@ def processar_pagina_pdf(b64_content, page_info=""):
                                         "turno": turno["turno"],
                                         "inicio": horario["inicio"],
                                         "fim": horario["fim"],
-                                        "setor": nome_setor,
-                                        "medico_setor": nome_setor
+                                        "medico_setor": nome_setor,
+                                        "medico_unidade": nome_unidade
                                     })
                             if plantoes:
                                 profissionais.append({
@@ -595,8 +554,6 @@ def processar_pagina_pdf(b64_content, page_info=""):
                                     "medico_crm": crm,
                                     "medico_especialidade": cargo,
                                     "medico_vinculo": vinculo,
-                                    "medico_setor": nome_setor,
-                                    "medico_unidade": nome_unidade,
                                     "plantoes": dedup_plantao(plantoes)
                                 })
         return profissionais
@@ -606,78 +563,58 @@ def processar_pagina_pdf(b64_content, page_info=""):
 
 @app.post("/normaliza-escala-MATERNIDADE-MATRICIAL")
 async def normaliza_escala_maternidade_matricial(request: Request):
-    print("Requisição recebida:", await request.json())
-    try:
-        body = await request.json()
-        todos_profissionais = []
+    body = await request.json()
+    todos_profissionais = []
 
-        # Usar lista de âncora como base
-        for prof in PROFISSIONAIS_ANCHOR:
-            todos_profissionais.append({
-                "medico_nome": prof["medico_nome"],
-                "medico_crm": "",
-                "medico_especialidade": "",
-                "medico_vinculo": "R.P. PAES",  # Assumido como padrão
-                "medico_setor": prof["medico_setor"],
-                "medico_unidade": prof["medico_unidade"],
-                "plantoes": []  # Plantões vazios por padrão, a serem preenchidos se PDF fornecido
-            })
+    for prof in PROFISSIONAIS_ANCHOR:
+        todos_profissionais.append({
+            "medico_nome": prof["medico_nome"],
+            "medico_crm": "",
+            "medico_especialidade": "",
+            "medico_vinculo": "R.P. PAES",
+            "plantoes": []
+        })
 
-        # Processar entrada como array (se houver PDFs)
-        if isinstance(body, list):
-            for idx, item in enumerate(body):
-                if "data" in item and isinstance(item["data"], list):
-                    for page_data in item["data"]:
-                        b64 = page_data.get("base64") or page_data.get("bae64")
-                        page_number = page_data.get("page_number", "unknown")
-                        if b64:
-                            profs = processar_pagina_pdf(b64, f"Item {idx+1}, página {page_number}")
-                            todos_profissionais.extend(profs)
-                else:
-                    b64 = item.get("base64") or item.get("bae64")
+    if isinstance(body, list):
+        for idx, item in enumerate(body):
+            if "data" in item and isinstance(item["data"], list):
+                for page_data in item["data"]:
+                    b64 = page_data.get("base64") or page_data.get("bae64")
                     if b64:
-                        profs = processar_pagina_pdf(b64, f"Item {idx+1}")
-                        todos_profissionais.extend(profs)
-
-        # Agrupar por médico para consolidar diferentes escalas
-        medicos_consolidados = {}
-        for prof in todos_profissionais:
-            nome = prof["medico_nome"]
-            if nome not in medicos_consolidados:
-                medicos_consolidados[nome] = []
-            medicos_consolidados[nome].append(prof)
-        
-        # Criar lista final mantendo escalas separadas para cada médico
-        profissionais_final = []
-        for nome, escalas in medicos_consolidados.items():
-            if len(escalas) == 1:
-                profissionais_final.append(escalas[0])
+                        todos_profissionais.extend(processar_pagina_pdf(b64, f"Item {idx+1}"))
             else:
-                for escala in escalas:
-                    profissionais_final.append(escala)
-        
-        profissionais_final.sort(key=lambda p: (p["medico_nome"], p["medico_setor"]))
+                b64 = item.get("base64") or item.get("bae64")
+                if b64:
+                    todos_profissionais.extend(processar_pagina_pdf(b64, f"Item {idx+1}"))
 
-        # Determinar mês/ano da escala
-        mes_nome_str = "JULHO"
-        ano = 2025
-        if profissionais_final:
-            primeiro_plantao = profissionais_final[0]["plantoes"][0] if profissionais_final[0]["plantoes"] else None
-            if primeiro_plantao:
-                data_parts = primeiro_plantao["data"].split("/")
-                mes = int(data_parts[1])
-                ano = int(data_parts[2])
-                mes_nome_str = [k for k, v in MONTH_MAP.items() if v == mes][0]
+    medicos_consolidados = {}
+    for prof in todos_profissionais:
+        nome = prof["medico_nome"]
+        if nome not in medicos_consolidados:
+            medicos_consolidados[nome] = []
+        medicos_consolidados[nome].append(prof)
 
-        return JSONResponse(content=[{
-            "unidade_escala": "MISTA",
-            "mes_ano_escala": f"{mes_nome_str}/{ano}",
-            "profissionais": profissionais_final
-        }])
+    profissionais_final = []
+    for nome, escalas in medicos_consolidados.items():
+        profissionais_final.extend(escalas)
 
-    except Exception as e:
-        print(f"Erro no endpoint: {str(e)}")
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+    profissionais_final.sort(key=lambda p: p["medico_nome"])
+
+    mes_nome_str = "JULHO"
+    ano = 2025
+    for prof in profissionais_final:
+        if prof["plantoes"]:
+            data_parts = prof["plantoes"][0]["data"].split("/")
+            mes = int(data_parts[1])
+            ano = int(data_parts[2])
+            mes_nome_str = [k for k, v in MONTH_MAP.items() if v == mes][0]
+            break
+
+    return JSONResponse(content=[{
+        "unidade_escala": "MISTA",
+        "mes_ano_escala": f"{mes_nome_str}/{ano}",
+        "profissionais": profissionais_final
+    }])
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
