@@ -1088,6 +1088,7 @@ async def normaliza_escala_PACS(request: Request):
 
 
 # --- INÍCIO normaliza-ESCALA-MATRIZ ---
+
 MONTH_MAP = {
     'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
     'JUNHO': 6, 'JULHO': 7, 'AGOSTO': 8, 'SETEMBRO': 9, 'OUTUBRO': 10,
@@ -1102,9 +1103,6 @@ HORARIOS_TURNO = {
 }
 
 def parse_mes_ano(text):
-    """
-    Extrai o mês e ano do texto usando regex.
-    """
     month_regex = '|'.join(MONTH_MAP.keys())
     match = re.search(r'(?:MÊS[^A-Z]*)?(' + month_regex + r')[^\d]*(\d{4})', text.upper())
     if not match:
@@ -1112,30 +1110,43 @@ def parse_mes_ano(text):
     mes_nome, ano_str = match.groups()
     return MONTH_MAP.get(mes_nome.upper()), int(ano_str)
 
-def extrair_setor(text, lines):
+def extrair_setor_e_unidade(text, lines):
     """
-    Extrai o setor do padrão UNIDADE/SETOR: [nome] ESCALA DE SERVIÇO: ou variações.
+    Extrai setor e unidade do texto, priorizando tabelas e texto bruto.
     """
     text_normalized = text.upper().replace('Ç', 'C').replace('Á', 'A').replace('É', 'E').replace('Í', 'I').replace('Ó', 'O').replace('Ú', 'U')
-    pattern = r'UNIDADE/SETOR:\s*([^\n]+?)\s*(?:ESCALA\s+DE\s+SERVICO:|\n|$)'
-    for line in lines:
+    nome_unidade = "NÃO INFORMADO"
+    nome_setor = "NÃO INFORMADO"
+
+    # Tentar extrair da tabela (primeiras linhas)
+    pattern_setor = r'UNIDADE/SETOR:\s*([^\n]+?)(?:\s*ESCALA\s+DE\s+SERVIÇO:|\n|$)'
+    pattern_unidade = r'UNIDADE:\s*([^\n]+)'
+    for line in lines[:10]:  # Verificar as primeiras 10 linhas para cabeçalho
         line_normalized = line.upper().replace('Ç', 'C').replace('Á', 'A').replace('É', 'E').replace('Í', 'I').replace('Ó', 'O').replace('Ú', 'U')
-        match = re.search(pattern, line_normalized, re.IGNORECASE)
-        if match:
-            setor = match.group(1).strip()
-            return setor
-    
-    # Fallback: extrair da unidade se setor não for encontrado
-    unidade_match = re.search(r'UNIDADE:\s*([^\n]+)', text_normalized, re.IGNORECASE)
-    if unidade_match:
-        return unidade_match.group(1).strip()
-    
-    return "NÃO INFORMADO"
+        setor_match = re.search(pattern_setor, line_normalized, re.IGNORECASE)
+        if setor_match:
+            nome_setor = setor_match.group(1).strip()
+        unidade_match = re.search(pattern_unidade, line_normalized, re.IGNORECASE)
+        if unidade_match:
+            nome_unidade = unidade_match.group(1).strip()
+
+    # Fallback para texto completo se não encontrado nas primeiras linhas
+    if nome_setor == "NÃO INFORMADO":
+        for line in lines:
+            line_normalized = line.upper().replace('Ç', 'C').replace('Á', 'A').replace('É', 'E').replace('Í', 'I').replace('Ó', 'O').replace('Ú', 'U')
+            setor_match = re.search(pattern_setor, line_normalized, re.IGNORECASE)
+            if setor_match:
+                nome_setor = setor_match.group(1).strip()
+                break
+    if nome_unidade == "NÃO INFORMADO":
+        unidade_match = re.search(pattern_unidade, text_normalized, re.IGNORECASE)
+        if unidade_match:
+            nome_unidade = unidade_match.group(1).strip()
+
+    print(f"Extraído - Unidade: {nome_unidade}, Setor: {nome_setor}")
+    return nome_unidade, nome_setor
 
 def interpretar_turno(token):
-    """
-    Interpreta os tokens de turno (M, T, D, N) e retorna uma lista de turnos.
-    """
     if not token or not isinstance(token, str):
         return []
     token_clean = token.replace('\n', '').replace(' ', '').replace('/', '')
@@ -1145,25 +1156,15 @@ def interpretar_turno(token):
         tokens = [token_clean[-1].upper()]
     else:
         tokens = list(token_clean.upper())
-
     turnos = []
     for t in tokens:
-        if t == 'M':
-            turnos.append({"turno": "MANHÃ"})
-        elif t == 'T':
-            turnos.append({"turno": "TARDE"})
-        elif t == 'D':
-            turnos.append({"turno": "MANHÃ"})
-            turnos.append({"turno": "TARDE"})
-        elif t == 'N':
-            turnos.append({"turno": "NOITE (início)"})
-            turnos.append({"turno": "NOITE (fim)"})
+        if t == 'M': turnos.append({"turno": "MANHÃ"})
+        elif t == 'T': turnos.append({"turno": "TARDE"})
+        elif t == 'D': turnos.append({"turno": "MANHÃ"}); turnos.append({"turno": "TARDE"})
+        elif t == 'N': turnos.append({"turno": "NOITE (início)"}); turnos.append({"turno": "NOITE (fim)"})
     return turnos
 
 def dedup_plantao(plantoes):
-    """
-    Remove duplicatas de plantões com base em data, turno, início e fim.
-    """
     seen = set()
     result = []
     for p in plantoes:
@@ -1174,37 +1175,24 @@ def dedup_plantao(plantoes):
     return result
 
 def processar_pagina_pdf(b64_content, page_info=""):
-    """
-    Processa uma página do PDF como uma escala independente.
-    """
     try:
         pdf_bytes = base64.b64decode(b64_content)
         profissionais = []
 
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             for page_num, page in enumerate(pdf.pages):
-                # Priorizar extração de tabelas
                 tables = page.extract_tables()
                 text = page.extract_text() or ""
                 lines = text.splitlines()
-                
-                # Remover linha do cabeçalho do governo se existir
                 lines = [l for l in lines if not l.strip().startswith("Governo do Estado")]
                 text = '\n'.join(lines)
 
-                # Extrair informações do cabeçalho a partir da tabela
-                nome_unidade = "NÃO INFORMADO"
-                nome_setor = "NÃO INFORMADO"
-                if tables and tables[0]:
-                    first_row = [str(cell or "").strip() for cell in tables[0][0] if cell]
-                    header_text = " ".join(first_row).upper()
-                    unidade_match = re.search(r'UNIDADE:\s*([^\n]+)', header_text, re.IGNORECASE)
-                    nome_unidade = unidade_match.group(1).strip() if unidade_match else "NÃO INFORMADO"
-                    setor_match = re.search(r'UNIDADE/SETOR:\s*([^\n]+?)\s*ESCALA\s+DE\s+SERVICO:', header_text, re.IGNORECASE)
-                    if setor_match:
-                        nome_setor = setor_match.group(1).strip()
-                    else:
-                        nome_setor = extrair_setor(text, lines)
+                # Extrair unidade e setor
+                nome_unidade, nome_setor = extrair_setor_e_unidade(text, lines)
+                if nome_setor == "NÃO INFORMADO":
+                    print(f"AVISO: Setor não encontrado em {page_info}, página {page_num + 1}")
+                if nome_unidade == "NÃO INFORMADO":
+                    print(f"AVISO: Unidade não encontrada em {page_info}, página {page_num + 1}")
 
                 # Extrair mês e ano
                 mes, ano = parse_mes_ano(text)
@@ -1229,29 +1217,23 @@ def processar_pagina_pdf(b64_content, page_info=""):
                                     elif "MATRÍCULA" in col_clean or "MATRICULA" in col_clean: header["matricula"] = i
                                     elif re.fullmatch(r"\d{1,2}", col_clean): header[int(col_clean)] = i
                                 continue
-
                             if "nome" not in header or not row or not row[header["nome"]]:
                                 continue
-
                             nome = str(row[header["nome"]]).replace('\n', ' ').strip()
                             if "SERVIDOR QUE ESTA FORA DA ESCALA" in nome.upper():
                                 break
-
                             crm = str(row[header.get("crm", -1)] or "").replace('\n', ' ').strip()
                             cargo = str(row[header.get("cargo", -1)] or "").replace('\n', ' ').strip()
                             vinculo = str(row[header.get("vinculo", -1)] or "").replace('\n', ' ').strip()
                             matricula = str(row[header.get("matricula", -1)] or "").replace('\n', ' ').strip()
-
                             if "PAES" not in f"{vinculo} {matricula}".upper():
                                 continue
-
                             plantoes = []
                             for dia in range(1, 32):
                                 idx = header.get(dia)
                                 if idx is None or idx >= len(row): continue
                                 cell = row[idx]
                                 if not cell: continue
-                                
                                 for turno in interpretar_turno(str(cell)):
                                     data_plantao = datetime(ano, mes, dia)
                                     if turno["turno"] == "NOITE (fim)":
@@ -1266,7 +1248,6 @@ def processar_pagina_pdf(b64_content, page_info=""):
                                         "setor": nome_setor,
                                         "medico_setor": nome_setor
                                     })
-
                             if plantoes:
                                 profissionais.append({
                                     "medico_nome": nome,
@@ -1277,7 +1258,6 @@ def processar_pagina_pdf(b64_content, page_info=""):
                                     "medico_unidade": nome_unidade,
                                     "plantoes": dedup_plantao(plantoes)
                                 })
-
         return profissionais
     except Exception as e:
         print(f"Erro processando {page_info}: {str(e)}")
@@ -1285,22 +1265,13 @@ def processar_pagina_pdf(b64_content, page_info=""):
 
 @app.post("/normaliza-escala-MATERNIDADE-MATRICIAL")
 async def normaliza_escala_maternidade_matricial(request: Request):
-    """
-    Endpoint para normalizar escalas de plantão a partir de PDFs enviados como base64.
-    """
+    print("Requisição recebida:", await request.json())
     try:
         body = await request.json()
         todos_profissionais = []
 
-        if isinstance(body, dict) and "pages" in body:
-            for page_data in body["pages"]:
-                b64 = page_data.get("file_base64")
-                page_number = page_data.get("page", "unknown")
-                if b64:
-                    profs = processar_pagina_pdf(b64, f"PDF página {page_number}")
-                    todos_profissionais.extend(profs)
-
-        elif isinstance(body, list):
+        # Processar entrada como array
+        if isinstance(body, list):
             for idx, item in enumerate(body):
                 if "data" in item and isinstance(item["data"], list):
                     for page_data in item["data"]:
@@ -1327,10 +1298,8 @@ async def normaliza_escala_maternidade_matricial(request: Request):
         profissionais_final = []
         for nome, escalas in medicos_consolidados.items():
             if len(escalas) == 1:
-                # Médico aparece em apenas uma escala
                 profissionais_final.append(escalas[0])
             else:
-                # Médico aparece em múltiplas escalas - manter separado por setor
                 for escala in escalas:
                     profissionais_final.append(escala)
         
