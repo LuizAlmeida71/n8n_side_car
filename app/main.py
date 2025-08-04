@@ -1112,9 +1112,14 @@ def parse_mes_ano(text):
 
 def extrair_setor_e_unidade(text, lines, table_data=None):
     """
-    Extrai setor e unidade do texto, lidando com layouts variados e melhorando a robustez.
+    Extrai setor e unidade com robustez aprimorada para erros de OCR e layouts variáveis.
     """
-    text_normalized = text.upper().replace('Ç', 'C').replace('Á', 'A').replace('É', 'E').replace('Í', 'I').replace('Ó', 'O').replace('Ú', 'U')
+    # Pré-processamento para corrigir erros comuns de OCR
+    text_normalized = text.upper()
+    text_normalized = re.sub(r'[^\w\s/:-]', ' ', text_normalized)  # Substitui caracteres estranhos por espaço
+    text_normalized = re.sub(r'\s+', ' ', text_normalized).strip()  # Normaliza espaços
+    lines = [re.sub(r'[^\w\s/:-]', ' ', line.upper()).strip() for line in lines if line.strip()]
+    
     nome_unidade = "NÃO INFORMADO"
     nome_setor = "NÃO INFORMADO"
 
@@ -1123,21 +1128,24 @@ def extrair_setor_e_unidade(text, lines, table_data=None):
         "HMINSN": "HOSPITAL MATERNO INFANTIL NOSSA SENHORA DE NAZARETH"
     }
 
-    # Padrões de extração
-    pattern_unidade = r'UNIDADE:\s*([^\n]*(?:\n\s*[^\n]*)*?)'
-    pattern_setor = r'UNIDADE/SETOR:\s*([^\n]*(?:\n\s*[^\n]*)*?)(?=\s*(ESCALA\s+DE\s+(SERVIÇO|SERVICO):|\n\s*NOME|\Z))'
+    # Padrões de extração mais tolerantes
+    pattern_unidade = r'(?:UNIDADE\s*[:\-])\s*([A-Z/\s]+)'
+    pattern_setor = r'(?:UNIDADE/SETOR\s*[:\-])\s*([^(\n]*(?:\n\s*[^(\n]*)*?)(?=\s*(?:ESCALA\s+DE\s+(?:SERVIÇO|SERVICO)\s*:|\n\s*NOME|\Z))'
+
+    # Depuração das linhas
+    print(f"Linhas processadas: {lines}")
 
     # Verificar todas as linhas
     for i, line in enumerate(lines):
-        line_normalized = line.upper().replace('Ç', 'C').replace('Á', 'A').replace('É', 'E').replace('Í', 'I').replace('Ó', 'O').replace('Ú', 'U')
-        unidade_match = re.search(pattern_unidade, line_normalized, re.IGNORECASE)
+        print(f"Linha {i}: {line}")
+        unidade_match = re.search(pattern_unidade, line, re.IGNORECASE)
         if unidade_match:
             nome_unidade = unidade_match.group(1).strip()
             nome_unidade = UNIDADE_ABREVIACOES.get(nome_unidade, nome_unidade)
-        setor_match = re.search(pattern_setor, line_normalized, re.IGNORECASE)
+        setor_match = re.search(pattern_setor, line, re.IGNORECASE)
         if setor_match:
             nome_setor = setor_match.group(1).strip()
-            nome_setor = re.sub(r'\s*(ESCALA\s+DE\s+(SERVIÇO|SERVICO):.*|\Z)', '', nome_setor).strip()
+            nome_setor = re.sub(r'\s*(?:ESCALA\s+DE\s+(?:SERVIÇO|SERVICO)\s*:.*|\Z)', '', nome_setor).strip()
         if nome_setor != "NÃO INFORMADO" and nome_unidade != "NÃO INFORMADO":
             break
 
@@ -1151,28 +1159,28 @@ def extrair_setor_e_unidade(text, lines, table_data=None):
         setor_match = re.search(pattern_setor, text_normalized, re.IGNORECASE | re.DOTALL)
         if setor_match:
             nome_setor = setor_match.group(1).strip()
-            nome_setor = re.sub(r'\s*(ESCALA\s+DE\s+(SERVIÇO|SERVICO):.*|\Z)', '', nome_setor).strip()
+            nome_setor = re.sub(r'\s*(?:ESCALA\s+DE\s+(?:SERVIÇO|SERVICO)\s*:.*|\Z)', '', nome_setor).strip()
 
-    # Fallback aprimorado: Inferir a partir de abreviações ou tabela
+    # Fallback aprimorado com análise de contexto
     if nome_unidade == "NÃO INFORMADO" and any(abrev in text_normalized for abrev in UNIDADE_ABREVIACOES):
         for abrev, unidade in UNIDADE_ABREVIACOES.items():
             if abrev in text_normalized:
                 nome_unidade = unidade
                 break
     if nome_setor == "NÃO INFORMADO" and table_data and len(table_data) > 0:
-        header_text = " ".join(str(cell or "").strip().upper() for cell in table_data[0][:3] if cell)
-        if "CENTRO OBSTETRICO" in header_text:
-            nome_setor = "CENTRO OBSTETRICO"
+        header_text = " ".join(str(cell or "").strip().upper() for cell in table_data[0][:5] if cell)
+        if any(term in header_text for term in ["CENTRO OBSTETRICO", "OBSTETRICIA", "GINECOLOGIA"]):
+            nome_setor = "CENTRO OBSTETRICO/ ORQUIDEAS"
         elif "TRIAGEM" in header_text:
             nome_setor = "TRIAGEM"
-        elif "ORQUIDEAS" in header_text:
-            nome_setor = "CENTRO OBSTETRICO/ ORQUIDEAS"
-        elif "CAMED" in header_text:
+        elif any(term in header_text for term in ["CAMED", "ISOLAMENTO", "UTIN", "UCIN"]):
             nome_setor = "CAMED/BLOCOS/ISOLAMENTO/UTIN/UCINco/UCINca"
-        elif "OBSTETRICIA" in header_text or "GINECOLOGIA" in header_text:
-            nome_setor = "CENTRO OBSTETRICO/ ORQUIDEAS"
 
-    print(f"Extraído - Unidade: {nome_unidade}, Setor: {nome_setor} (Texto extraído: {text[:300]}...)")  # Mais contexto para depuração
+    # Validação final
+    if "ESCALA DE SERVIÇO" in nome_setor or "ESCALA DE SERVICO" in nome_setor:
+        nome_setor = re.sub(r'\s*(?:ESCALA\s+DE\s+(?:SERVIÇO|SERVICO)\s*:.*)', '', nome_setor).strip() or "NÃO INFORMADO"
+
+    print(f"Extraído - Unidade: {nome_unidade}, Setor: {nome_setor} (Texto extraído: {text_normalized[:500]}...)")
     return nome_unidade, nome_setor
 
 def interpretar_turno(token):
@@ -1203,11 +1211,8 @@ def dedup_plantao(plantoes):
             result.append(p)
     return result
 
-def processar_pagina_pdf(b64_content, page_info=""):
+def processar_pagina_pdf(pdf_bytes, page_info=""):
     try:
-        pdf_bytes = base64.b64decode(b64_content)
-        profissionais = []
-
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             for page_num, page in enumerate(pdf.pages):
                 tables = page.extract_tables()
@@ -1293,28 +1298,12 @@ def processar_pagina_pdf(b64_content, page_info=""):
         return []
 
 @app.post("/normaliza-escala-MATERNIDADE-MATRICIAL")
-async def normaliza_escala_maternidade_matricial(request: Request):
-    print("Requisição recebida:", await request.json())
+async def normaliza_escala_maternidade_matricial(file: UploadFile = File(...)):
+    print(f"Requisição recebida: Arquivo {file.filename}")
     try:
-        body = await request.json()
-        todos_profissionais = []
-
-        # Processar entrada como array
-        if isinstance(body, list):
-            for idx, item in enumerate(body):
-                if "data" in item and isinstance(item["data"], list):
-                    for page_data in item["data"]:
-                        b64 = page_data.get("base64") or page_data.get("bae64")
-                        page_number = page_data.get("page_number", "unknown")
-                        if b64:
-                            profs = processar_pagina_pdf(b64, f"Item {idx+1}, página {page_number}")
-                            todos_profissionais.extend(profs)
-                else:
-                    b64 = item.get("base64") or item.get("bae64")
-                    if b64:
-                        profs = processar_pagina_pdf(b64, f"Item {idx+1}")
-                        todos_profissionais.extend(profs)
-
+        pdf_bytes = await file.read()
+        todos_profissionais = processar_pagina_pdf(pdf_bytes, file.filename)
+        
         # Agrupar por médico para consolidar diferentes escalas
         medicos_consolidados = {}
         for prof in todos_profissionais:
@@ -1335,7 +1324,7 @@ async def normaliza_escala_maternidade_matricial(request: Request):
         profissionais_final.sort(key=lambda p: (p["medico_nome"], p["medico_setor"]))
 
         # Determinar mês/ano da escala
-        mes_nome_str = "JULHO"  # Ajustado para 01/07/2025 no exemplo
+        mes_nome_str = "JULHO"
         ano = 2025
         if profissionais_final:
             primeiro_plantao = profissionais_final[0]["plantoes"][0] if profissionais_final[0]["plantoes"] else None
@@ -1350,7 +1339,6 @@ async def normaliza_escala_maternidade_matricial(request: Request):
             "mes_ano_escala": f"{mes_nome_str}/{ano}",
             "profissionais": profissionais_final
         }])
-
     except Exception as e:
         print(f"Erro no endpoint: {str(e)}")
         return JSONResponse(content={"error": str(e)}, status_code=500)
