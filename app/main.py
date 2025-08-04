@@ -1088,6 +1088,16 @@ async def normaliza_escala_PACS(request: Request):
 
 
 # --- INÍCIO normaliza-ESCALA-MATRIZ ---
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+import base64
+import io
+import re
+from datetime import datetime, timedelta
+import pdfplumber
+import uvicorn
+
+app = FastAPI()
 
 MONTH_MAP = {
     'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
@@ -1112,38 +1122,42 @@ def parse_mes_ano(text):
 
 def extrair_setor_e_unidade(text, lines):
     """
-    Extrai setor e unidade do texto, priorizando tabelas e texto bruto.
+    Extrai setor e unidade do texto, capturando apenas até ESCALA DE SERVIÇO:.
     """
     text_normalized = text.upper().replace('Ç', 'C').replace('Á', 'A').replace('É', 'E').replace('Í', 'I').replace('Ó', 'O').replace('Ú', 'U')
     nome_unidade = "NÃO INFORMADO"
     nome_setor = "NÃO INFORMADO"
 
-    # Tentar extrair da tabela (primeiras linhas)
-    pattern_setor = r'UNIDADE/SETOR:\s*([^\n]+?)(?:\s*ESCALA\s+DE\s+SERVIÇO:|\n|$)'
-    pattern_unidade = r'UNIDADE:\s*([^\n]+)'
-    for line in lines[:10]:  # Verificar as primeiras 10 linhas para cabeçalho
+    # Padrões de extração
+    pattern_setor = r'UNIDADE/SETOR:\s*([^\n]*(?:\n\s*[^\n]*)*?)(?=(?:\s*ESCALA\s+DE\s+SERVIÇO:|\n\s*NOME|\Z))'
+    pattern_unidade = r'UNIDADE:\s*([^\n]*(?:\n\s*[^\n]*)*?)'
+
+    # Verificar todas as linhas
+    for i, line in enumerate(lines):
         line_normalized = line.upper().replace('Ç', 'C').replace('Á', 'A').replace('É', 'E').replace('Í', 'I').replace('Ó', 'O').replace('Ú', 'U')
         setor_match = re.search(pattern_setor, line_normalized, re.IGNORECASE)
         if setor_match:
             nome_setor = setor_match.group(1).strip()
+            # Remover qualquer texto após "ESCALA DE SERVIÇO:" se presente na mesma captura
+            nome_setor = re.sub(r'\s*ESCALA\s+DE\s+SERVIÇO:.*', '', nome_setor).strip()
         unidade_match = re.search(pattern_unidade, line_normalized, re.IGNORECASE)
         if unidade_match:
             nome_unidade = unidade_match.group(1).strip()
+        if nome_setor != "NÃO INFORMADO" and nome_unidade != "NÃO INFORMADO":
+            break
 
-    # Fallback para texto completo se não encontrado nas primeiras linhas
+    # Fallback para texto completo
     if nome_setor == "NÃO INFORMADO":
-        for line in lines:
-            line_normalized = line.upper().replace('Ç', 'C').replace('Á', 'A').replace('É', 'E').replace('Í', 'I').replace('Ó', 'O').replace('Ú', 'U')
-            setor_match = re.search(pattern_setor, line_normalized, re.IGNORECASE)
-            if setor_match:
-                nome_setor = setor_match.group(1).strip()
-                break
+        setor_match = re.search(pattern_setor, text_normalized, re.IGNORECASE | re.DOTALL)
+        if setor_match:
+            nome_setor = setor_match.group(1).strip()
+            nome_setor = re.sub(r'\s*ESCALA\s+DE\s+SERVIÇO:.*', '', nome_setor).strip()
     if nome_unidade == "NÃO INFORMADO":
-        unidade_match = re.search(pattern_unidade, text_normalized, re.IGNORECASE)
+        unidade_match = re.search(pattern_unidade, text_normalized, re.IGNORECASE | re.DOTALL)
         if unidade_match:
             nome_unidade = unidade_match.group(1).strip()
 
-    print(f"Extraído - Unidade: {nome_unidade}, Setor: {nome_setor}")
+    print(f"Extraído - Unidade: {nome_unidade}, Setor: {nome_setor} (Texto extraído: {text[:100]}...)")
     return nome_unidade, nome_setor
 
 def interpretar_turno(token):
@@ -1325,4 +1339,7 @@ async def normaliza_escala_maternidade_matricial(request: Request):
     except Exception as e:
         print(f"Erro no endpoint: {str(e)}")
         return JSONResponse(content={"error": str(e)}, status_code=500)
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
 # --- FIM normaliza-ESCALA-MATRIZ ---
