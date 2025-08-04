@@ -1112,7 +1112,7 @@ def parse_mes_ano(text):
 
 def extrair_setor_e_unidade(text, lines, table_data=None):
     """
-    Extrai setor e unidade do texto, lidando com layouts variados.
+    Extrai setor e unidade do texto, lidando com layouts variados e melhorando a robustez.
     """
     text_normalized = text.upper().replace('Ç', 'C').replace('Á', 'A').replace('É', 'E').replace('Í', 'I').replace('Ó', 'O').replace('Ú', 'U')
     nome_unidade = "NÃO INFORMADO"
@@ -1125,7 +1125,7 @@ def extrair_setor_e_unidade(text, lines, table_data=None):
 
     # Padrões de extração
     pattern_unidade = r'UNIDADE:\s*([^\n]*(?:\n\s*[^\n]*)*?)'
-    pattern_setor = r'UNIDADE/SETOR:\s*([^\n]*(?:\n\s*[^\n]*)*?)(?=\s*ESCALA\s+DE\s+SERVIÇO:|\n\s*NOME|\Z)'
+    pattern_setor = r'UNIDADE/SETOR:\s*([^\n]*(?:\n\s*[^\n]*)*?)(?=\s*(ESCALA\s+DE\s+(SERVIÇO|SERVICO):|\n\s*NOME|\Z))'
 
     # Verificar todas as linhas
     for i, line in enumerate(lines):
@@ -1133,12 +1133,11 @@ def extrair_setor_e_unidade(text, lines, table_data=None):
         unidade_match = re.search(pattern_unidade, line_normalized, re.IGNORECASE)
         if unidade_match:
             nome_unidade = unidade_match.group(1).strip()
-            # Verificar se é abreviação
             nome_unidade = UNIDADE_ABREVIACOES.get(nome_unidade, nome_unidade)
         setor_match = re.search(pattern_setor, line_normalized, re.IGNORECASE)
         if setor_match:
             nome_setor = setor_match.group(1).strip()
-            nome_setor = re.sub(r'\s*ESCALA\s+DE\s+SERVIÇO:.*', '', nome_setor).strip()
+            nome_setor = re.sub(r'\s*(ESCALA\s+DE\s+(SERVIÇO|SERVICO):.*|\Z)', '', nome_setor).strip()
         if nome_setor != "NÃO INFORMADO" and nome_unidade != "NÃO INFORMADO":
             break
 
@@ -1152,7 +1151,7 @@ def extrair_setor_e_unidade(text, lines, table_data=None):
         setor_match = re.search(pattern_setor, text_normalized, re.IGNORECASE | re.DOTALL)
         if setor_match:
             nome_setor = setor_match.group(1).strip()
-            nome_setor = re.sub(r'\s*ESCALA\s+DE\s+SERVIÇO:.*', '', nome_setor).strip()
+            nome_setor = re.sub(r'\s*(ESCALA\s+DE\s+(SERVIÇO|SERVICO):.*|\Z)', '', nome_setor).strip()
 
     # Fallback aprimorado: Inferir a partir de abreviações ou tabela
     if nome_unidade == "NÃO INFORMADO" and any(abrev in text_normalized for abrev in UNIDADE_ABREVIACOES):
@@ -1170,8 +1169,10 @@ def extrair_setor_e_unidade(text, lines, table_data=None):
             nome_setor = "CENTRO OBSTETRICO/ ORQUIDEAS"
         elif "CAMED" in header_text:
             nome_setor = "CAMED/BLOCOS/ISOLAMENTO/UTIN/UCINco/UCINca"
+        elif "OBSTETRICIA" in header_text or "GINECOLOGIA" in header_text:
+            nome_setor = "CENTRO OBSTETRICO/ ORQUIDEAS"
 
-    print(f"Extraído - Unidade: {nome_unidade}, Setor: {nome_setor} (Texto extraído: {text[:200]}...)")
+    print(f"Extraído - Unidade: {nome_unidade}, Setor: {nome_setor} (Texto extraído: {text[:300]}...)")  # Mais contexto para depuração
     return nome_unidade, nome_setor
 
 def interpretar_turno(token):
@@ -1334,7 +1335,7 @@ async def normaliza_escala_maternidade_matricial(request: Request):
         profissionais_final.sort(key=lambda p: (p["medico_nome"], p["medico_setor"]))
 
         # Determinar mês/ano da escala
-        mes_nome_str = "JUNHO"
+        mes_nome_str = "JULHO"  # Ajustado para 01/07/2025 no exemplo
         ano = 2025
         if profissionais_final:
             primeiro_plantao = profissionais_final[0]["plantoes"][0] if profissionais_final[0]["plantoes"] else None
