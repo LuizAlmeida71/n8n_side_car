@@ -1110,44 +1110,68 @@ def parse_mes_ano(text):
     mes_nome, ano_str = match.groups()
     return MONTH_MAP.get(mes_nome.upper()), int(ano_str)
 
-def extrair_setor_e_unidade(text, lines):
+def extrair_setor_e_unidade(text, lines, table_data=None):
     """
-    Extrai setor e unidade do texto, capturando apenas até ESCALA DE SERVIÇO:.
+    Extrai setor e unidade do texto, lidando com layouts variados.
     """
     text_normalized = text.upper().replace('Ç', 'C').replace('Á', 'A').replace('É', 'E').replace('Í', 'I').replace('Ó', 'O').replace('Ú', 'U')
     nome_unidade = "NÃO INFORMADO"
     nome_setor = "NÃO INFORMADO"
 
+    # Mapeamento de abreviações
+    UNIDADE_ABREVIACOES = {
+        "HMINSN": "HOSPITAL MATERNO INFANTIL NOSSA SENHORA DE NAZARETH"
+    }
+
     # Padrões de extração
-    pattern_setor = r'UNIDADE/SETOR:\s*([^\n]*(?:\n\s*[^\n]*)*?)(?=(?:\s*ESCALA\s+DE\s+SERVIÇO:|\n\s*NOME|\Z))'
     pattern_unidade = r'UNIDADE:\s*([^\n]*(?:\n\s*[^\n]*)*?)'
+    pattern_setor = r'UNIDADE/SETOR:\s*([^\n]*(?:\n\s*[^\n]*)*?)(?=\s*ESCALA\s+DE\s+SERVIÇO:|\n\s*NOME|\Z)'
 
     # Verificar todas as linhas
     for i, line in enumerate(lines):
         line_normalized = line.upper().replace('Ç', 'C').replace('Á', 'A').replace('É', 'E').replace('Í', 'I').replace('Ó', 'O').replace('Ú', 'U')
-        setor_match = re.search(pattern_setor, line_normalized, re.IGNORECASE)
-        if setor_match:
-            nome_setor = setor_match.group(1).strip()
-            # Remover qualquer texto após "ESCALA DE SERVIÇO:" se presente na mesma captura
-            nome_setor = re.sub(r'\s*ESCALA\s+DE\s+SERVIÇO:.*', '', nome_setor).strip()
         unidade_match = re.search(pattern_unidade, line_normalized, re.IGNORECASE)
         if unidade_match:
             nome_unidade = unidade_match.group(1).strip()
+            # Verificar se é abreviação
+            nome_unidade = UNIDADE_ABREVIACOES.get(nome_unidade, nome_unidade)
+        setor_match = re.search(pattern_setor, line_normalized, re.IGNORECASE)
+        if setor_match:
+            nome_setor = setor_match.group(1).strip()
+            nome_setor = re.sub(r'\s*ESCALA\s+DE\s+SERVIÇO:.*', '', nome_setor).strip()
         if nome_setor != "NÃO INFORMADO" and nome_unidade != "NÃO INFORMADO":
             break
 
     # Fallback para texto completo
+    if nome_unidade == "NÃO INFORMADO":
+        unidade_match = re.search(pattern_unidade, text_normalized, re.IGNORECASE | re.DOTALL)
+        if unidade_match:
+            nome_unidade = unidade_match.group(1).strip()
+            nome_unidade = UNIDADE_ABREVIACOES.get(nome_unidade, nome_unidade)
     if nome_setor == "NÃO INFORMADO":
         setor_match = re.search(pattern_setor, text_normalized, re.IGNORECASE | re.DOTALL)
         if setor_match:
             nome_setor = setor_match.group(1).strip()
             nome_setor = re.sub(r'\s*ESCALA\s+DE\s+SERVIÇO:.*', '', nome_setor).strip()
-    if nome_unidade == "NÃO INFORMADO":
-        unidade_match = re.search(pattern_unidade, text_normalized, re.IGNORECASE | re.DOTALL)
-        if unidade_match:
-            nome_unidade = unidade_match.group(1).strip()
 
-    print(f"Extraído - Unidade: {nome_unidade}, Setor: {nome_setor} (Texto extraído: {text[:100]}...)")
+    # Fallback aprimorado: Inferir a partir de abreviações ou tabela
+    if nome_unidade == "NÃO INFORMADO" and any(abrev in text_normalized for abrev in UNIDADE_ABREVIACOES):
+        for abrev, unidade in UNIDADE_ABREVIACOES.items():
+            if abrev in text_normalized:
+                nome_unidade = unidade
+                break
+    if nome_setor == "NÃO INFORMADO" and table_data and len(table_data) > 0:
+        header_text = " ".join(str(cell or "").strip().upper() for cell in table_data[0][:3] if cell)
+        if "CENTRO OBSTETRICO" in header_text:
+            nome_setor = "CENTRO OBSTETRICO"
+        elif "TRIAGEM" in header_text:
+            nome_setor = "TRIAGEM"
+        elif "ORQUIDEAS" in header_text:
+            nome_setor = "CENTRO OBSTETRICO/ ORQUIDEAS"
+        elif "CAMED" in header_text:
+            nome_setor = "CAMED/BLOCOS/ISOLAMENTO/UTIN/UCINco/UCINca"
+
+    print(f"Extraído - Unidade: {nome_unidade}, Setor: {nome_setor} (Texto extraído: {text[:200]}...)")
     return nome_unidade, nome_setor
 
 def interpretar_turno(token):
@@ -1192,7 +1216,7 @@ def processar_pagina_pdf(b64_content, page_info=""):
                 text = '\n'.join(lines)
 
                 # Extrair unidade e setor
-                nome_unidade, nome_setor = extrair_setor_e_unidade(text, lines)
+                nome_unidade, nome_setor = extrair_setor_e_unidade(text, lines, tables[0] if tables else None)
                 if nome_setor == "NÃO INFORMADO":
                     print(f"AVISO: Setor não encontrado em {page_info}, página {page_num + 1}")
                 if nome_unidade == "NÃO INFORMADO":
