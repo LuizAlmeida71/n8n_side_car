@@ -553,15 +553,6 @@ return JSONResponse(content={"error": str(e), "trace": traceback.format_exc()}, 
 
 
 # --- INÍCIO normaliza-ESCALA-MATRIZ ---
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-import base64
-import io
-import re
-from datetime import datetime, timedelta
-import pdfplumber
-
-app = FastAPI()
 
 MONTH_MAP = {
     'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
