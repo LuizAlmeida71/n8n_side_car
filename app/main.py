@@ -1102,6 +1102,16 @@ HORARIOS_TURNO = {
     "NOITE (fim)": {"inicio": "01:00", "fim": "07:00"},
 }
 
+# Lista de profissionais da RP PAES como âncora
+PROFISSIONAIS_ANCHOR = [
+    {"medico_nome": "MARCO ANTÔNIO LEAL SANTOS", "medico_setor": "CAMED/BLOCOS/ISOLAMENTO/UTIN/UCINco/UCINca", "medico_unidade": "HMINSN"},
+    {"medico_nome": "MOACIR BARBOSA NETO", "medico_setor": "CAMED/BLOCOS/ISOLAMENTO/UTIN/UCINco/UCINca", "medico_unidade": "HMINSN"},
+    {"medico_nome": "ROBERTO ANDRADE LIMA", "medico_setor": "CAMED/BLOCOS/ISOLAMENTO/UTIN/UCINco/UCINca", "medico_unidade": "HMINSN"},
+    {"medico_nome": "MARYCASSIELY RODRIGUES TIZOLIM", "medico_setor": "NIR/ISOLAMENTO/BLOCOS/UTIN/UTIM", "medico_unidade": "HMINSN"},
+    {"medico_nome": "CIBELE LOUSANE PINHO MOTA", "medico_setor": "NIR/ISOLAMENTO/BLOCOS/UTIN/UTIM", "medico_unidade": "HMINSN"},
+    {"medico_nome": "MANOEL MESSIAS DOS SANTOS NETO", "medico_setor": "NIR/ISOLAMENTO/BLOCOS/UTIN/UTIM", "medico_unidade": "HMINSN"}
+]
+
 def parse_mes_ano(text):
     month_regex = '|'.join(MONTH_MAP.keys())
     match = re.search(r'(?:MÊS[^A-Z]*)?(' + month_regex + r')[^\d]*(\d{4})', text.upper())
@@ -1301,7 +1311,19 @@ async def normaliza_escala_maternidade_matricial(request: Request):
         body = await request.json()
         todos_profissionais = []
 
-        # Processar entrada como array
+        # Usar lista de âncora como base
+        for prof in PROFISSIONAIS_ANCHOR:
+            todos_profissionais.append({
+                "medico_nome": prof["medico_nome"],
+                "medico_crm": "",
+                "medico_especialidade": "",
+                "medico_vinculo": "R.P. PAES",  # Assumido como padrão
+                "medico_setor": prof["medico_setor"],
+                "medico_unidade": prof["medico_unidade"],
+                "plantoes": []  # Plantões vazios por padrão, a serem preenchidos se PDF fornecido
+            })
+
+        # Processar entrada como array (se houver PDFs)
         if isinstance(body, list):
             for idx, item in enumerate(body):
                 if "data" in item and isinstance(item["data"], list):
@@ -1337,7 +1359,7 @@ async def normaliza_escala_maternidade_matricial(request: Request):
         profissionais_final.sort(key=lambda p: (p["medico_nome"], p["medico_setor"]))
 
         # Determinar mês/ano da escala
-        mes_nome_str = "JULHO"  # Ajustado com base em "02/06/2025" e "01/07/2025" nos exemplos
+        mes_nome_str = "JULHO"
         ano = 2025
         if profissionais_final:
             primeiro_plantao = profissionais_final[0]["plantoes"][0] if profissionais_final[0]["plantoes"] else None
