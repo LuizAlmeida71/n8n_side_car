@@ -320,7 +320,7 @@ def interpretar_turno(token: str, medico_setor: str):
     if not token or not isinstance(token, str):
         return []
 
-         token_clean = token.replace('\n', ' ').replace('/', ' ').replace(' ', '')
+    token_clean = token.replace('\n', ' ').replace('/', ' ').replace(' ', '')
     tokens = list(token_clean)
     turnos_finais = []
     if "TOTAL" in token.upper() or "PL" in token.upper():
