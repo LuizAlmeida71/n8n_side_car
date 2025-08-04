@@ -60,39 +60,40 @@ return JSONResponse(content={"error": str(e)}, status_code=500)
 
 @app.post("/split-pdf")
 async def split_pdf(file: UploadFile = File(...)):
-    try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-            contents = await file.read()
-            tmp.write(contents)
-            tmp_path = tmp.name
+try:
+with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+contents = await file.read()
+tmp.write(contents)
+tmp_path = tmp.name
 
-        pages_b64 = []
+pages_b64 = []
 
-        with fitz.open(tmp_path) as doc:
-            for i in range(len(doc)):
-                single_page = fitz.open()
-                single_page.insert_pdf(doc, from_page=i, to_page=i)
+with fitz.open(tmp_path) as doc:
+for i in range(len(doc)):
+single_page = fitz.open()
+single_page.insert_pdf(doc, from_page=i, to_page=i)
 
-                page_path = f"/tmp/page_{i+1}.pdf"
-                single_page.save(page_path, garbage=4, deflate=True, incremental=False)
+b64_bytes = single_page.write()  # gera bytes do PDF da página
+b64_content = base64.b64encode(b64_bytes).decode("utf-8")
 
-                with open(page_path, "rb") as f:
-                    b64_content = base64.b64encode(f.read()).decode("utf-8")
-                    pages_b64.append({
-                        "page": i + 1,
-                        "file_base64": b64_content,
-                        "filename": f"page_{i+1}.pdf"
-                    })
+pages_b64.append({
+"page": i + 1,
+"file_base64": b64_content,
+"filename": f"page_{i+1}.pdf"
+})
 
-                os.remove(page_path)
+single_page.close()
 
-        os.remove(tmp_path)
-        return JSONResponse(content={"pages": pages_b64})
+os.remove(tmp_path)
+return JSONResponse(content={"pages": pages_b64})
 
-    except Exception as e:
-        if 'tmp_path' in locals() and os.path.exists(tmp_path):
-            os.remove(tmp_path)
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+except Exception as e:
+if 'tmp_path' in locals() and os.path.exists(tmp_path):
+os.remove(tmp_path)
+return JSONResponse(
+content={"error": str(e), "trace": traceback.format_exc()},
+status_code=500
+)
 
 
 
@@ -1101,16 +1102,6 @@ HORARIOS_TURNO = {
 "NOITE (fim)": {"inicio": "01:00", "fim": "07:00"},
 }
 
-# Lista de profissionais da RP PAES como âncora
-PROFISSIONAIS_ANCHOR = [
-    {"medico_nome": "MARCO ANTÔNIO LEAL SANTOS", "medico_setor": "CAMED/BLOCOS/ISOLAMENTO/UTIN/UCINco/UCINca", "medico_unidade": "HMINSN"},
-    {"medico_nome": "MOACIR BARBOSA NETO", "medico_setor": "CAMED/BLOCOS/ISOLAMENTO/UTIN/UCINco/UCINca", "medico_unidade": "HMINSN"},
-    {"medico_nome": "ROBERTO ANDRADE LIMA", "medico_setor": "CAMED/BLOCOS/ISOLAMENTO/UTIN/UCINco/UCINca", "medico_unidade": "HMINSN"},
-    {"medico_nome": "MARYCASSIELY RODRIGUES TIZOLIM", "medico_setor": "NIR/ISOLAMENTO/BLOCOS/UTIN/UTIM", "medico_unidade": "HMINSN"},
-    {"medico_nome": "CIBELE LOUSANE PINHO MOTA", "medico_setor": "NIR/ISOLAMENTO/BLOCOS/UTIN/UTIM", "medico_unidade": "HMINSN"},
-    {"medico_nome": "MANOEL MESSIAS DOS SANTOS NETO", "medico_setor": "NIR/ISOLAMENTO/BLOCOS/UTIN/UTIM", "medico_unidade": "HMINSN"}
-]
-
 def parse_mes_ano(text):
 month_regex = '|'.join(MONTH_MAP.keys())
 match = re.search(r'(?:MÊS[^A-Z]*)?(' + month_regex + r')[^\d]*(\d{4})', text.upper())
@@ -1119,71 +1110,80 @@ return None, None
 mes_nome, ano_str = match.groups()
 return MONTH_MAP.get(mes_nome.upper()), int(ano_str)
 
+def extrair_setor_e_unidade(text, lines):
 def extrair_setor_e_unidade(text, lines, table_data=None):
 """
-   Extrai setor e unidade do texto com robustez aprimorada.
+    Extrai setor e unidade do texto, capturando apenas até ESCALA DE SERVIÇO:.
+    Extrai setor e unidade do texto, lidando com layouts variados.
    """
 text_normalized = text.upper().replace('Ç', 'C').replace('Á', 'A').replace('É', 'E').replace('Í', 'I').replace('Ó', 'O').replace('Ú', 'U')
 nome_unidade = "NÃO INFORMADO"
 nome_setor = "NÃO INFORMADO"
 
-# Mapeamento de abreviações
-UNIDADE_ABREVIACOES = {
-"HMINSN": "HOSPITAL MATERNO INFANTIL NOSSA SENHORA DE NAZARETH"
-}
+    # Mapeamento de abreviações
+    UNIDADE_ABREVIACOES = {
+        "HMINSN": "HOSPITAL MATERNO INFANTIL NOSSA SENHORA DE NAZARETH"
+    }
 
 # Padrões de extração
+    pattern_setor = r'UNIDADE/SETOR:\s*([^\n]*(?:\n\s*[^\n]*)*?)(?=(?:\s*ESCALA\s+DE\s+SERVIÇO:|\n\s*NOME|\Z))'
 pattern_unidade = r'UNIDADE:\s*([^\n]*(?:\n\s*[^\n]*)*?)'
-pattern_setor = r'UNIDADE/SETOR:\s*([^(\n]*(?:\n\s*[^(\n]*)*?)(?=\s*(ESCALA\s+DE\s+(SERVIÇO|SERVICO):|\n\s*NOME|\Z))'
-
-# Depuração das linhas
-print(f"Linhas processadas: {lines}")
+    pattern_setor = r'UNIDADE/SETOR:\s*([^\n]*(?:\n\s*[^\n]*)*?)(?=\s*ESCALA\s+DE\s+SERVIÇO:|\n\s*NOME|\Z)'
 
 # Verificar todas as linhas
 for i, line in enumerate(lines):
 line_normalized = line.upper().replace('Ç', 'C').replace('Á', 'A').replace('É', 'E').replace('Í', 'I').replace('Ó', 'O').replace('Ú', 'U')
-print(f"Linha {i}: {line_normalized}")
-unidade_match = re.search(pattern_unidade, line_normalized, re.IGNORECASE)
-if unidade_match:
-nome_unidade = unidade_match.group(1).strip()
-nome_unidade = UNIDADE_ABREVIACOES.get(nome_unidade, nome_unidade)
+        unidade_match = re.search(pattern_unidade, line_normalized, re.IGNORECASE)
+        if unidade_match:
+            nome_unidade = unidade_match.group(1).strip()
+            # Verificar se é abreviação
+            nome_unidade = UNIDADE_ABREVIACOES.get(nome_unidade, nome_unidade)
 setor_match = re.search(pattern_setor, line_normalized, re.IGNORECASE)
 if setor_match:
 nome_setor = setor_match.group(1).strip()
-nome_setor = re.sub(r'\s*(ESCALA\s+DE\s+(SERVIÇO|SERVICO):.*|\Z)', '', nome_setor).strip()
+            # Remover qualquer texto após "ESCALA DE SERVIÇO:" se presente na mesma captura
+nome_setor = re.sub(r'\s*ESCALA\s+DE\s+SERVIÇO:.*', '', nome_setor).strip()
+        unidade_match = re.search(pattern_unidade, line_normalized, re.IGNORECASE)
+        if unidade_match:
+            nome_unidade = unidade_match.group(1).strip()
 if nome_setor != "NÃO INFORMADO" and nome_unidade != "NÃO INFORMADO":
 break
 
 # Fallback para texto completo
-if nome_unidade == "NÃO INFORMADO":
-unidade_match = re.search(pattern_unidade, text_normalized, re.IGNORECASE | re.DOTALL)
-if unidade_match:
-nome_unidade = unidade_match.group(1).strip()
-nome_unidade = UNIDADE_ABREVIACOES.get(nome_unidade, nome_unidade)
+    if nome_unidade == "NÃO INFORMADO":
+        unidade_match = re.search(pattern_unidade, text_normalized, re.IGNORECASE | re.DOTALL)
+        if unidade_match:
+            nome_unidade = unidade_match.group(1).strip()
+            nome_unidade = UNIDADE_ABREVIACOES.get(nome_unidade, nome_unidade)
 if nome_setor == "NÃO INFORMADO":
 setor_match = re.search(pattern_setor, text_normalized, re.IGNORECASE | re.DOTALL)
 if setor_match:
 nome_setor = setor_match.group(1).strip()
-nome_setor = re.sub(r'\s*(ESCALA\s+DE\s+(SERVIÇO|SERVICO):.*|\Z)', '', nome_setor).strip()
+nome_setor = re.sub(r'\s*ESCALA\s+DE\s+SERVIÇO:.*', '', nome_setor).strip()
+    if nome_unidade == "NÃO INFORMADO":
+        unidade_match = re.search(pattern_unidade, text_normalized, re.IGNORECASE | re.DOTALL)
+        if unidade_match:
+            nome_unidade = unidade_match.group(1).strip()
 
-# Fallback aprimorado: Inferir a partir de abreviações ou tabela
-if nome_unidade == "NÃO INFORMADO" and any(abrev in text_normalized for abrev in UNIDADE_ABREVIACOES):
-for abrev, unidade in UNIDADE_ABREVIACOES.items():
-if abrev in text_normalized:
-nome_unidade = unidade
-break
-if nome_setor == "NÃO INFORMADO" and table_data and len(table_data) > 0:
-header_text = " ".join(str(cell or "").strip().upper() for cell in table_data[0][:5] if cell)  # Ampliar para 5 colunas
-if "CENTRO OBSTETRICO" in header_text or "OBSTETRICIA" in header_text or "GINECOLOGIA" in header_text:
-nome_setor = "CENTRO OBSTETRICO/ ORQUIDEAS"
-elif "TRIAGEM" in header_text:
-nome_setor = "TRIAGEM"
-elif "CAMED" in header_text:
-nome_setor = "CAMED/BLOCOS/ISOLAMENTO/UTIN/UCINco/UCINca"
-elif "ISOLAMENTO" in header_text:
-nome_setor = "CAMED/BLOCOS/ISOLAMENTO/UTIN/UCINco/UCINca"
+    print(f"Extraído - Unidade: {nome_unidade}, Setor: {nome_setor} (Texto extraído: {text[:100]}...)")
+    # Fallback aprimorado: Inferir a partir de abreviações ou tabela
+    if nome_unidade == "NÃO INFORMADO" and any(abrev in text_normalized for abrev in UNIDADE_ABREVIACOES):
+        for abrev, unidade in UNIDADE_ABREVIACOES.items():
+            if abrev in text_normalized:
+                nome_unidade = unidade
+                break
+    if nome_setor == "NÃO INFORMADO" and table_data and len(table_data) > 0:
+        header_text = " ".join(str(cell or "").strip().upper() for cell in table_data[0][:3] if cell)
+        if "CENTRO OBSTETRICO" in header_text:
+            nome_setor = "CENTRO OBSTETRICO"
+        elif "TRIAGEM" in header_text:
+            nome_setor = "TRIAGEM"
+        elif "ORQUIDEAS" in header_text:
+            nome_setor = "CENTRO OBSTETRICO/ ORQUIDEAS"
+        elif "CAMED" in header_text:
+            nome_setor = "CAMED/BLOCOS/ISOLAMENTO/UTIN/UCINco/UCINca"
 
-print(f"Extraído - Unidade: {nome_unidade}, Setor: {nome_setor} (Texto extraído: {text[:500]}...)")  # Mais contexto
+    print(f"Extraído - Unidade: {nome_unidade}, Setor: {nome_setor} (Texto extraído: {text[:200]}...)")
 return nome_unidade, nome_setor
 
 def interpretar_turno(token):
@@ -1228,7 +1228,8 @@ lines = [l for l in lines if not l.strip().startswith("Governo do Estado")]
 text = '\n'.join(lines)
 
 # Extrair unidade e setor
-nome_unidade, nome_setor = extrair_setor_e_unidade(text, lines, tables[0] if tables else None)
+                nome_unidade, nome_setor = extrair_setor_e_unidade(text, lines)
+                nome_unidade, nome_setor = extrair_setor_e_unidade(text, lines, tables[0] if tables else None)
 if nome_setor == "NÃO INFORMADO":
 print(f"AVISO: Setor não encontrado em {page_info}, página {page_num + 1}")
 if nome_unidade == "NÃO INFORMADO":
@@ -1310,20 +1311,7 @@ try:
 body = await request.json()
 todos_profissionais = []
 
-        # Processar entrada como array
-        # Usar lista de âncora como base
-        for prof in PROFISSIONAIS_ANCHOR:
-            todos_profissionais.append({
-                "medico_nome": prof["medico_nome"],
-                "medico_crm": "",
-                "medico_especialidade": "",
-                "medico_vinculo": "R.P. PAES",  # Assumido como padrão
-                "medico_setor": prof["medico_setor"],
-                "medico_unidade": prof["medico_unidade"],
-                "plantoes": []  # Plantões vazios por padrão, a serem preenchidos se PDF fornecido
-            })
-
-        # Processar entrada como array (se houver PDFs)
+# Processar entrada como array
 if isinstance(body, list):
 for idx, item in enumerate(body):
 if "data" in item and isinstance(item["data"], list):
@@ -1359,8 +1347,7 @@ profissionais_final.append(escala)
 profissionais_final.sort(key=lambda p: (p["medico_nome"], p["medico_setor"]))
 
 # Determinar mês/ano da escala
-        mes_nome_str = "JULHO"  # Ajustado com base em "02/06/2025" e "01/07/2025" nos exemplos
-        mes_nome_str = "JULHO"
+mes_nome_str = "JUNHO"
 ano = 2025
 if profissionais_final:
 primeiro_plantao = profissionais_final[0]["plantoes"][0] if profissionais_final[0]["plantoes"] else None
