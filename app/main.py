@@ -78,15 +78,13 @@ async def split_pdf(file: UploadFile = File(...)):
 
                 with open(page_path, "rb") as f:
                     b64_content = base64.b64encode(f.read()).decode("utf-8")
-
-                pages_b64.append({
-                    "page": i + 1,
-                    "file_base64": b64_content,
-                    "filename": f"page_{i+1}.pdf"
-                })
+                    pages_b64.append({
+                        "page": i + 1,
+                        "file_base64": b64_content,
+                        "filename": f"page_{i+1}.pdf"
+                    })
 
                 os.remove(page_path)
-                single_page.close()
 
         os.remove(tmp_path)
         return JSONResponse(content={"pages": pages_b64})
@@ -94,10 +92,7 @@ async def split_pdf(file: UploadFile = File(...)):
     except Exception as e:
         if 'tmp_path' in locals() and os.path.exists(tmp_path):
             os.remove(tmp_path)
-        return JSONResponse(
-            content={"error": str(e), "trace": traceback.format_exc()},
-            status_code=500
-        )
+        return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
 
