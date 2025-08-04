@@ -1088,14 +1088,33 @@ async def normaliza_escala_PACS(request: Request):
 
 
 # --- INÍCIO normaliza-ESCALA-MATRIZ ---
-import re
-import pdfplumber
-import io
-from datetime import datetime, timedelta
+MONTH_MAP = {
+    'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
+    'JUNHO': 6, 'JULHO': 7, 'AGOSTO': 8, 'SETEMBRO': 9, 'OUTUBRO': 10,
+    'NOVEMBRO': 11, 'DEZEMBRO': 12
+}
+
+HORARIOS_TURNO = {
+    "MANHÃ": {"inicio": "07:00", "fim": "13:00"},
+    "TARDE": {"inicio": "13:00", "fim": "19:00"},
+    "NOITE (início)": {"inicio": "19:00", "fim": "01:00"},
+    "NOITE (fim)": {"inicio": "01:00", "fim": "07:00"},
+}
+
+def parse_mes_ano(text):
+    """
+    Extrai o mês e ano do texto usando regex.
+    """
+    month_regex = '|'.join(MONTH_MAP.keys())
+    match = re.search(r'(?:MÊS[^A-Z]*)?(' + month_regex + r')[^\d]*(\d{4})', text.upper())
+    if not match:
+        return None, None
+    mes_nome, ano_str = match.groups()
+    return MONTH_MAP.get(mes_nome.upper()), int(ano_str)
 
 def extrair_setor(text, lines):
     """
-    Extrai o setor do padrão UNIDADE/SETOR: [nome] ESCALA DE SERVIÇO:
+    Extrai o setor do padrão UNIDADE/SETOR: [nome] ESCALA DE SERVIÇO: ou variações.
     """
     text_normalized = text.upper().replace('Ç', 'C').replace('Á', 'A').replace('É', 'E').replace('Í', 'I').replace('Ó', 'O').replace('Ú', 'U')
     pattern = r'UNIDADE/SETOR:\s*([^\n]+?)\s*(?:ESCALA\s+DE\s+SERVICO:|\n|$)'
@@ -1105,17 +1124,18 @@ def extrair_setor(text, lines):
         if match:
             setor = match.group(1).strip()
             return setor
+    
+    # Fallback: extrair da unidade se setor não for encontrado
+    unidade_match = re.search(r'UNIDADE:\s*([^\n]+)', text_normalized, re.IGNORECASE)
+    if unidade_match:
+        return unidade_match.group(1).strip()
+    
     return "NÃO INFORMADO"
 
-def parse_mes_ano(text):
-    month_regex = '|'.join(MONTH_MAP.keys())
-    match = re.search(r'(?:MÊS[^A-Z]*)?(' + month_regex + r')[^\d]*(\d{4})', text.upper())
-    if not match:
-        return None, None
-    mes_nome, ano_str = match.groups()
-    return MONTH_MAP.get(mes_nome.upper()), int(ano_str)
-
 def interpretar_turno(token):
+    """
+    Interpreta os tokens de turno (M, T, D, N) e retorna uma lista de turnos.
+    """
     if not token or not isinstance(token, str):
         return []
     token_clean = token.replace('\n', '').replace(' ', '').replace('/', '')
@@ -1125,6 +1145,7 @@ def interpretar_turno(token):
         tokens = [token_clean[-1].upper()]
     else:
         tokens = list(token_clean.upper())
+
     turnos = []
     for t in tokens:
         if t == 'M':
@@ -1140,6 +1161,9 @@ def interpretar_turno(token):
     return turnos
 
 def dedup_plantao(plantoes):
+    """
+    Remove duplicatas de plantões com base em data, turno, início e fim.
+    """
     seen = set()
     result = []
     for p in plantoes:
@@ -1151,7 +1175,7 @@ def dedup_plantao(plantoes):
 
 def processar_pagina_pdf(b64_content, page_info=""):
     """
-    Processa uma página do PDF como uma escala independente
+    Processa uma página do PDF como uma escala independente.
     """
     try:
         pdf_bytes = base64.b64decode(b64_content)
@@ -1159,7 +1183,7 @@ def processar_pagina_pdf(b64_content, page_info=""):
 
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             for page_num, page in enumerate(pdf.pages):
-                # Tentar extrair tabelas primeiro
+                # Priorizar extração de tabelas
                 tables = page.extract_tables()
                 text = page.extract_text() or ""
                 lines = text.splitlines()
@@ -1180,7 +1204,6 @@ def processar_pagina_pdf(b64_content, page_info=""):
                     if setor_match:
                         nome_setor = setor_match.group(1).strip()
                     else:
-                        # Fallback para texto bruto se a tabela não contiver o setor
                         nome_setor = extrair_setor(text, lines)
 
                 # Extrair mês e ano
@@ -1259,4 +1282,78 @@ def processar_pagina_pdf(b64_content, page_info=""):
     except Exception as e:
         print(f"Erro processando {page_info}: {str(e)}")
         return []
+
+@app.post("/normaliza-escala-MATERNIDADE-MATRICIAL")
+async def normaliza_escala_maternidade_matricial(request: Request):
+    """
+    Endpoint para normalizar escalas de plantão a partir de PDFs enviados como base64.
+    """
+    try:
+        body = await request.json()
+        todos_profissionais = []
+
+        if isinstance(body, dict) and "pages" in body:
+            for page_data in body["pages"]:
+                b64 = page_data.get("file_base64")
+                page_number = page_data.get("page", "unknown")
+                if b64:
+                    profs = processar_pagina_pdf(b64, f"PDF página {page_number}")
+                    todos_profissionais.extend(profs)
+
+        elif isinstance(body, list):
+            for idx, item in enumerate(body):
+                if "data" in item and isinstance(item["data"], list):
+                    for page_data in item["data"]:
+                        b64 = page_data.get("base64") or page_data.get("bae64")
+                        page_number = page_data.get("page_number", "unknown")
+                        if b64:
+                            profs = processar_pagina_pdf(b64, f"Item {idx+1}, página {page_number}")
+                            todos_profissionais.extend(profs)
+                else:
+                    b64 = item.get("base64") or item.get("bae64")
+                    if b64:
+                        profs = processar_pagina_pdf(b64, f"Item {idx+1}")
+                        todos_profissionais.extend(profs)
+
+        # Agrupar por médico para consolidar diferentes escalas
+        medicos_consolidados = {}
+        for prof in todos_profissionais:
+            nome = prof["medico_nome"]
+            if nome not in medicos_consolidados:
+                medicos_consolidados[nome] = []
+            medicos_consolidados[nome].append(prof)
+        
+        # Criar lista final mantendo escalas separadas para cada médico
+        profissionais_final = []
+        for nome, escalas in medicos_consolidados.items():
+            if len(escalas) == 1:
+                # Médico aparece em apenas uma escala
+                profissionais_final.append(escalas[0])
+            else:
+                # Médico aparece em múltiplas escalas - manter separado por setor
+                for escala in escalas:
+                    profissionais_final.append(escala)
+        
+        profissionais_final.sort(key=lambda p: (p["medico_nome"], p["medico_setor"]))
+
+        # Determinar mês/ano da escala
+        mes_nome_str = "JUNHO"
+        ano = 2025
+        if profissionais_final:
+            primeiro_plantao = profissionais_final[0]["plantoes"][0] if profissionais_final[0]["plantoes"] else None
+            if primeiro_plantao:
+                data_parts = primeiro_plantao["data"].split("/")
+                mes = int(data_parts[1])
+                ano = int(data_parts[2])
+                mes_nome_str = [k for k, v in MONTH_MAP.items() if v == mes][0]
+
+        return JSONResponse(content=[{
+            "unidade_escala": "MISTA",
+            "mes_ano_escala": f"{mes_nome_str}/{ano}",
+            "profissionais": profissionais_final
+        }])
+
+    except Exception as e:
+        print(f"Erro no endpoint: {str(e)}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
 # --- FIM normaliza-ESCALA-MATRIZ ---
