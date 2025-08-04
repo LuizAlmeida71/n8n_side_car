@@ -428,7 +428,8 @@ def extrair_setor_e_unidade(text, lines, table_data=None):
         "HMINSN": "HOSPITAL MATERNO INFANTIL NOSSA SENHORA DE NAZARETH"
     }
     pattern_unidade = r'UNIDADE:\s*([^\n]*(?:\n\s*[^\n]*)*?)'
-    pattern_setor = r'UNIDADE/SETOR:\s*([^(\n]*(?:\n\s*[^(\n]*)*?)'
+    pattern_setor = r'UNIDADE/SETOR:\s*([^(\n]*(?:\n\s*[^(
+]*)*?)'
 
     for line in lines:
         line_normalized = line.upper()
