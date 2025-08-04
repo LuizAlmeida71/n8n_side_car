@@ -60,40 +60,44 @@ return JSONResponse(content={"error": str(e)}, status_code=500)
 
 @app.post("/split-pdf")
 async def split_pdf(file: UploadFile = File(...)):
-try:
-with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-contents = await file.read()
-tmp.write(contents)
-tmp_path = tmp.name
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            contents = await file.read()
+            tmp.write(contents)
+            tmp_path = tmp.name
 
-pages_b64 = []
+        pages_b64 = []
 
-with fitz.open(tmp_path) as doc:
-for i in range(len(doc)):
-single_page = fitz.open()
-single_page.insert_pdf(doc, from_page=i, to_page=i)
+        with fitz.open(tmp_path) as doc:
+            for i in range(len(doc)):
+                single_page = fitz.open()
+                single_page.insert_pdf(doc, from_page=i, to_page=i)
 
-b64_bytes = single_page.write()  # gera bytes do PDF da página
-b64_content = base64.b64encode(b64_bytes).decode("utf-8")
+                page_path = f"/tmp/page_{i+1}.pdf"
+                single_page.save(page_path, garbage=4, deflate=True, incremental=False)
 
-pages_b64.append({
-"page": i + 1,
-"file_base64": b64_content,
-"filename": f"page_{i+1}.pdf"
-})
+                with open(page_path, "rb") as f:
+                    b64_content = base64.b64encode(f.read()).decode("utf-8")
 
-single_page.close()
+                pages_b64.append({
+                    "page": i + 1,
+                    "file_base64": b64_content,
+                    "filename": f"page_{i+1}.pdf"
+                })
 
-os.remove(tmp_path)
-return JSONResponse(content={"pages": pages_b64})
+                os.remove(page_path)
+                single_page.close()
 
-except Exception as e:
-if 'tmp_path' in locals() and os.path.exists(tmp_path):
-os.remove(tmp_path)
-return JSONResponse(
-content={"error": str(e), "trace": traceback.format_exc()},
-status_code=500
-)
+        os.remove(tmp_path)
+        return JSONResponse(content={"pages": pages_b64})
+
+    except Exception as e:
+        if 'tmp_path' in locals() and os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        return JSONResponse(
+            content={"error": str(e), "trace": traceback.format_exc()},
+            status_code=500
+        )
 
 
 
