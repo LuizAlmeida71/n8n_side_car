@@ -389,13 +389,11 @@ async def normaliza_escala_PACS(request: Request):
 # --- FIM normaliza-escala-PACS ---
 
 # --- INÍCIO normaliza-ESCALA-MATRIZ ---
-
 MONTH_MAP = {
     'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
     'JUNHO': 6, 'JULHO': 7, 'AGOSTO': 8, 'SETEMBRO': 9, 'OUTUBRO': 10,
     'NOVEMBRO': 11, 'DEZEMBRO': 12
 }
-
 HORARIOS_TURNO = {
     "MANHÃ": {"inicio": "07:00", "fim": "13:00"},
     "TARDE": {"inicio": "13:00", "fim": "19:00"},
@@ -403,88 +401,41 @@ HORARIOS_TURNO = {
     "NOITE (fim)": {"inicio": "01:00", "fim": "07:00"},
 }
 
-PROFISSIONAIS_ANCHOR = [
-    {"medico_nome": "MARCO ANTÔNIO LEAL SANTOS"},
-    {"medico_nome": "MOACIR BARBOSA NETO"},
-    {"medico_nome": "ROBERTO ANDRADE LIMA"},
-    {"medico_nome": "MARYCASSIELY RODRIGUES TIZOLIM"},
-    {"medico_nome": "CIBELE LOUSANE PINHO MOTA"},
-    {"medico_nome": "MANOEL MESSIAS DOS SANTOS NETO"}
-]
-
 def parse_mes_ano(text):
     month_regex = '|'.join(MONTH_MAP.keys())
     match = re.search(r'(?:MÊS[^A-Z]*)?(' + month_regex + r')[^\d]*(\d{4})', text.upper())
-    if not match:
-        return None, None
-    mes_nome, ano_str = match.groups()
-    return MONTH_MAP.get(mes_nome.upper()), int(ano_str)
+    return (MONTH_MAP.get(match.group(1).upper()), int(match.group(2))) if match else (None, None)
 
-def extrair_setor_e_unidade(text, lines, table_data=None):
-    text_normalized = text.upper()
-    nome_unidade = "NÃO INFORMADO"
-    nome_setor = "NÃO INFORMADO"
-    UNIDADE_ABREVIACOES = {
-        "HMINSN": "HOSPITAL MATERNO INFANTIL NOSSA SENHORA DE NAZARETH"
-    }
-    pattern_unidade = r'UNIDADE:\s*([^\n]*(?:\n\s*[^\n]*)*?)'
-    pattern_setor = r'UNIDADE/SETOR:\s*([^(\n]*(?:\n\s*[^(
-]*)*?)'
+def extrair_setor_e_unidade(text, lines):
+    # MELHORIA: Regex mais precisa para extrair o setor, parando em "ESCALA"
+    pattern_setor = r'UNIDADE/SETOR:\s*([^\n]+?)(?=\s*ESCALA\s+DE\s+SERVIÇO|$)'
+    setor_match = re.search(pattern_setor, text, re.IGNORECASE)
+    nome_setor = setor_match.group(1).strip() if setor_match else "NÃO INFORMADO"
 
-    for line in lines:
-        line_normalized = line.upper()
-        unidade_match = re.search(pattern_unidade, line_normalized, re.IGNORECASE)
-        if unidade_match:
-            nome_unidade = unidade_match.group(1).strip()
-            nome_unidade = UNIDADE_ABREVIACOES.get(nome_unidade, nome_unidade)
-        setor_match = re.search(pattern_setor, line_normalized, re.IGNORECASE)
-        if setor_match:
-            nome_setor = setor_match.group(1).strip()
-        if nome_setor != "NÃO INFORMADO" and nome_unidade != "NÃO INFORMADO":
-            break
-
-    if nome_unidade == "NÃO INFORMADO":
-        unidade_match = re.search(pattern_unidade, text_normalized, re.IGNORECASE | re.DOTALL)
-        if unidade_match:
-            nome_unidade = unidade_match.group(1).strip()
-            nome_unidade = UNIDADE_ABREVIACOES.get(nome_unidade, nome_unidade)
-    if nome_setor == "NÃO INFORMADO":
-        setor_match = re.search(pattern_setor, text_normalized, re.IGNORECASE | re.DOTALL)
-        if setor_match:
-            nome_setor = setor_match.group(1).strip()
-
-    if nome_unidade == "NÃO INFORMADO" and any(abrev in text_normalized for abrev in UNIDADE_ABREVIACOES):
-        for abrev, unidade in UNIDADE_ABREVIACOES.items():
-            if abrev in text_normalized:
-                nome_unidade = unidade
-                break
-    if nome_setor == "NÃO INFORMADO" and table_data and len(table_data) > 0:
-        header_text = " ".join(str(cell or "").strip().upper() for cell in table_data[0][:5] if cell)
-        if "CAMED" in header_text or "ISOLAMENTO" in header_text:
-            nome_setor = "CAMED/BLOCOS/ISOLAMENTO/UTIN/UCINco/UCINca"
+    pattern_unidade = r'UNIDADE:\s*([^\n]+)'
+    unidade_match = re.search(pattern_unidade, text, re.IGNORECASE)
+    nome_unidade = unidade_match.group(1).strip() if unidade_match else "NÃO INFORMADO"
+    
+    UNIDADE_MAP = {"HMINSN": "HOSPITAL MATERNO INFANTIL NOSSA SENHORA DE NAZARETH"}
+    nome_unidade = UNIDADE_MAP.get(nome_unidade, nome_unidade)
+    
     return nome_unidade, nome_setor
 
 def interpretar_turno(token):
-    if not token or not isinstance(token, str):
-        return []
+    if not token or not isinstance(token, str): return []
     token_clean = token.replace('\n', '').replace(' ', '').replace('/', '')
-    if "TOTAL" in token.upper() or "PL" in token.upper():
-        return []
-    if len(token_clean) >= 2 and token_clean[-1].upper() in ['M', 'T', 'D', 'N']:
-        tokens = [token_clean[-1].upper()]
-    else:
-        tokens = list(token_clean.upper())
+    if any(stop in token.upper() for stop in ["TOTAL", "PL"]): return []
+    tokens = [token_clean[-1].upper()] if len(token_clean) >= 2 and token_clean[-1].upper() in 'MTDN' else list(token_clean.upper())
     turnos = []
     for t in tokens:
         if t == 'M': turnos.append({"turno": "MANHÃ"})
         elif t == 'T': turnos.append({"turno": "TARDE"})
-        elif t == 'D': turnos.append({"turno": "MANHÃ"}); turnos.append({"turno": "TARDE"})
-        elif t == 'N': turnos.append({"turno": "NOITE (início)"}); turnos.append({"turno": "NOITE (fim)"})
+        elif t == 'D': turnos.extend([{"turno": "MANHÃ"}, {"turno": "TARDE"}])
+        elif t == 'N': turnos.extend([{"turno": "NOITE (início)"}, {"turno": "NOITE (fim)"}])
     return turnos
 
 def dedup_plantao(plantoes):
-    seen = set()
-    result = []
+    seen, result = set(), []
     for p in plantoes:
         key = (p["data"], p["turno"], p["inicio"], p["fim"])
         if key not in seen:
@@ -492,131 +443,132 @@ def dedup_plantao(plantoes):
             result.append(p)
     return result
 
+# --- FUNÇÃO PRINCIPAL DE PROCESSAMENTO (COM AS MELHORIAS) ---
 def processar_pagina_pdf(b64_content, page_info=""):
     try:
         pdf_bytes = base64.b64decode(b64_content)
         profissionais = []
+
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-            for page_num, page in enumerate(pdf.pages):
-                tables = page.extract_tables()
+            for page in pdf.pages:
                 text = page.extract_text() or ""
                 lines = [l for l in text.splitlines() if not l.strip().startswith("Governo do Estado")]
                 text = '\n'.join(lines)
-                nome_unidade, nome_setor = extrair_setor_e_unidade(text, lines, tables[0] if tables else None)
+
+                nome_unidade, nome_setor = extrair_setor_e_unidade(text, lines)
                 mes, ano = parse_mes_ano(text)
-                if not mes or not ano:
-                    continue
+                if not mes or not ano: continue
+
+                tables = page.extract_tables()
                 if tables:
                     for table in tables:
                         header = {}
-                        for row_idx, row in enumerate(table):
-                            if not header and any("NOME" in str(c).upper() for c in row if c):
+                        for row in table:
+                            if not header and any("NOME" in str(c or '').upper() for c in row):
                                 for i, col in enumerate(row):
-                                    col_clean = (col or "").strip().upper()
+                                    col_clean = str(col or '').strip().upper()
                                     if "NOME" in col_clean: header["nome"] = i
+                                    elif "VÍNCULO" in col_clean: header["vinculo"] = i
                                     elif "CARGO" in col_clean: header["cargo"] = i
-                                    elif "VÍNCULO" in col_clean or "VINCULO" in col_clean: header["vinculo"] = i
-                                    elif "CRM" in col_clean or "CONSELHO" in col_clean: header["crm"] = i
-                                    elif "MATRÍCULA" in col_clean or "MATRICULA" in col_clean: header["matricula"] = i
+                                    elif "CRM" in col_clean: header["crm"] = i
                                     elif re.fullmatch(r"\d{1,2}", col_clean): header[int(col_clean)] = i
                                 continue
-                            if "nome" not in header or not row or not row[header["nome"]]:
+
+                            if "nome" not in header or not row or not row[header["nome"]]: continue
+                            
+                            linha_completa = " ".join(filter(None, [str(c).replace('\n', ' ').strip() for c in row]))
+
+                            if "PAES" not in linha_completa.upper() and "PJ" not in linha_completa.upper():
                                 continue
+
                             nome = str(row[header["nome"]]).replace('\n', ' ').strip()
-                            crm = str(row[header.get("crm", -1)] or "").replace('\n', ' ').strip()
-                            cargo = str(row[header.get("cargo", -1)] or "").replace('\n', ' ').strip()
-                            vinculo = str(row[header.get("vinculo", -1)] or "").replace('\n', ' ').strip()
-                            matricula = str(row[header.get("matricula", -1)] or "").replace('\n', ' ').strip()
-                            if "PAES" not in f"{vinculo} {matricula}".upper():
-                                continue
+                            vinculo = str(row[header.get("vinculo", -1)] or "R.P. PAES").strip()
+                            
+                            # MELHORIA: Extração de especialidade via Regex na linha completa
+                            especialidade_match = re.search(r'(MÉDICO\s+CLÍNICO\s+GERAL|CLÍNICO\s+GERAL|MÉDICO\s+GINECO/OBSTETRA|PEDIATRA|NEUROCIRURGIÃO)', linha_completa, re.IGNORECASE)
+                            cargo = especialidade_match.group(0).strip() if especialidade_match else (str(row[header.get("cargo", -1)] or "").strip())
+                            
                             plantoes = []
-                            for dia in range(1, 32):
-                                idx = header.get(dia)
-                                if idx is None or idx >= len(row): continue
-                                cell = row[idx]
-                                if not cell: continue
-                                for turno in interpretar_turno(str(cell)):
-                                    data_plantao = datetime(ano, mes, dia)
-                                    if turno["turno"] == "NOITE (fim)":
-                                        data_plantao += timedelta(days=1)
-                                    horario = HORARIOS_TURNO[turno["turno"]]
-                                    plantoes.append({
-                                        "dia": data_plantao.day,
-                                        "data": data_plantao.strftime("%d/%m/%Y"),
-                                        "turno": turno["turno"],
-                                        "inicio": horario["inicio"],
-                                        "fim": horario["fim"],
-                                        "medico_setor": nome_setor,
-                                        "medico_unidade": nome_unidade
-                                    })
+                            for dia, col_idx in header.items():
+                                if isinstance(dia, int) and col_idx < len(row) and row[col_idx]:
+                                    for turno in interpretar_turno(str(row[col_idx])):
+                                        data_plantao = datetime(ano, mes, dia)
+                                        if turno["turno"] == "NOITE (fim)": data_plantao += timedelta(days=1)
+                                        horario = HORARIOS_TURNO[turno["turno"]]
+                                        plantoes.append({
+                                            "dia": data_plantao.day,
+                                            "data": data_plantao.strftime("%d/%m/%Y"),
+                                            "turno": turno["turno"],
+                                            "inicio": horario["inicio"],
+                                            "fim": horario["fim"],
+                                            "setor": nome_setor,
+                                            "medico_unidade": nome_unidade # Adiciona unidade a cada plantão
+                                        })
+                            
                             if plantoes:
                                 profissionais.append({
                                     "medico_nome": nome,
-                                    "medico_crm": crm,
+                                    "medico_crm": str(row[header.get("crm", -1)] or "").strip(),
                                     "medico_especialidade": cargo,
                                     "medico_vinculo": vinculo,
+                                    "medico_setor": nome_setor, # Adiciona setor ao nível do profissional
                                     "plantoes": dedup_plantao(plantoes)
                                 })
         return profissionais
     except Exception as e:
-        print(f"Erro processando {page_info}: {str(e)}")
+        print(f"Erro processando {page_info}: {str(e)}\n{traceback.format_exc()}")
         return []
 
+# --- ENDPOINT (LÓGICA SIMPLIFICADA) ---
 @app.post("/normaliza-escala-MATERNIDADE-MATRICIAL")
 async def normaliza_escala_maternidade_matricial(request: Request):
-    body = await request.json()
-    todos_profissionais = []
+    try:
+        body = await request.json()
+        todos_profissionais = []
 
-    for prof in PROFISSIONAIS_ANCHOR:
-        todos_profissionais.append({
-            "medico_nome": prof["medico_nome"],
-            "medico_crm": "",
-            "medico_especialidade": "",
-            "medico_vinculo": "R.P. PAES",
-            "plantoes": []
-        })
-
-    if isinstance(body, list):
-        for idx, item in enumerate(body):
-            if "data" in item and isinstance(item["data"], list):
-                for page_data in item["data"]:
-                    b64 = page_data.get("base64") or page_data.get("bae64")
-                    if b64:
-                        todos_profissionais.extend(processar_pagina_pdf(b64, f"Item {idx+1}"))
-            else:
-                b64 = item.get("base64") or item.get("bae64")
+        if isinstance(body, list):
+            for i, page_data in enumerate(body):
+                b64 = page_data.get("base64") or page_data.get("bae64")
                 if b64:
-                    todos_profissionais.extend(processar_pagina_pdf(b64, f"Item {idx+1}"))
+                    profissionais_da_pagina = processar_pagina_pdf(b64, f"Página {i+1}")
+                    todos_profissionais.extend(profissionais_da_pagina)
+        
+        # Agrupar por médico para consolidar plantões de diferentes escalas/páginas
+        medicos_consolidados = defaultdict(lambda: {
+            "plantoes": [], "info": {}
+        })
+        for prof in todos_profissionais:
+            nome = prof["medico_nome"]
+            if not medicos_consolidados[nome]["info"]:
+                # Copia as informações do profissional (sem os plantões) na primeira vez que ele aparece
+                medicos_consolidados[nome]["info"] = {k: v for k, v in prof.items() if k != 'plantoes'}
+            # Adiciona os plantões da aparição atual
+            medicos_consolidados[nome]["plantoes"].extend(prof["plantoes"])
+        
+        # Monta a lista final com os dados consolidados
+        profissionais_final = []
+        for nome, data in medicos_consolidados.items():
+            prof_obj = data["info"]
+            prof_obj["plantoes"] = dedup_plantao(data["plantoes"])
+            prof_obj["plantoes"].sort(key=lambda p: datetime.strptime(p['data'], '%d/%m/%Y'))
+            profissionais_final.append(prof_obj)
 
-    medicos_consolidados = {}
-    for prof in todos_profissionais:
-        nome = prof["medico_nome"]
-        if nome not in medicos_consolidados:
-            medicos_consolidados[nome] = []
-        medicos_consolidados[nome].append(prof)
+        profissionais_final.sort(key=lambda p: p["medico_nome"])
 
-    profissionais_final = []
-    for nome, escalas in medicos_consolidados.items():
-        profissionais_final.extend(escalas)
-
-    profissionais_final.sort(key=lambda p: p["medico_nome"])
-
-    mes_nome_str = "JULHO"
-    ano = 2025
-    for prof in profissionais_final:
-        if prof["plantoes"]:
-            data_parts = prof["plantoes"][0]["data"].split("/")
+        mes_nome_str, ano = "JULHO", 2025 # Fallback
+        if profissionais_final and any(p["plantoes"] for p in profissionais_final):
+            primeiro_plantao = next((p for p in profissionais_final if p["plantoes"]), {}).get("plantoes")[0]
+            data_parts = primeiro_plantao["data"].split("/")
             mes = int(data_parts[1])
             ano = int(data_parts[2])
             mes_nome_str = [k for k, v in MONTH_MAP.items() if v == mes][0]
-            break
 
-    return JSONResponse(content=[{
-        "unidade_escala": "MISTA",
-        "mes_ano_escala": f"{mes_nome_str}/{ano}",
-        "profissionais": profissionais_final
-    }])
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+        return JSONResponse(content=[{
+            "unidade_escala": "MISTA",
+            "mes_ano_escala": f"{mes_nome_str}/{ano}",
+            "profissionais": profissionais_final
+        }])
+    except Exception as e:
+        print(f"Erro no endpoint: {str(e)}\n{traceback.format_exc()}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
 # --- FIM normaliza-ESCALA-MATRIZ ---
