@@ -1088,19 +1088,24 @@ async def normaliza_escala_PACS(request: Request):
 
 
 # --- INÍCIO normaliza-ESCALA-MATRIZ ---
+import re
+import pdfplumber
+import io
+from datetime import datetime, timedelta
 
-MONTH_MAP = {
-    'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'ABRIL': 4, 'MAIO': 5,
-    'JUNHO': 6, 'JULHO': 7, 'AGOSTO': 8, 'SETEMBRO': 9, 'OUTUBRO': 10,
-    'NOVEMBRO': 11, 'DEZEMBRO': 12
-}
-
-HORARIOS_TURNO = {
-    "MANHÃ": {"inicio": "07:00", "fim": "13:00"},
-    "TARDE": {"inicio": "13:00", "fim": "19:00"},
-    "NOITE (início)": {"inicio": "19:00", "fim": "01:00"},
-    "NOITE (fim)": {"inicio": "01:00", "fim": "07:00"},
-}
+def extrair_setor(text, lines):
+    """
+    Extrai o setor do padrão UNIDADE/SETOR: [nome] ESCALA DE SERVIÇO:
+    """
+    text_normalized = text.upper().replace('Ç', 'C').replace('Á', 'A').replace('É', 'E').replace('Í', 'I').replace('Ó', 'O').replace('Ú', 'U')
+    pattern = r'UNIDADE/SETOR:\s*([^\n]+?)\s*(?:ESCALA\s+DE\s+SERVICO:|\n|$)'
+    for line in lines:
+        line_normalized = line.upper().replace('Ç', 'C').replace('Á', 'A').replace('É', 'E').replace('Í', 'I').replace('Ó', 'O').replace('Ú', 'U')
+        match = re.search(pattern, line_normalized, re.IGNORECASE)
+        if match:
+            setor = match.group(1).strip()
+            return setor
+    return "NÃO INFORMADO"
 
 def parse_mes_ano(text):
     month_regex = '|'.join(MONTH_MAP.keys())
@@ -1109,21 +1114,6 @@ def parse_mes_ano(text):
         return None, None
     mes_nome, ano_str = match.groups()
     return MONTH_MAP.get(mes_nome.upper()), int(ano_str)
-
-def extrair_setor(text, lines):
-    """
-    Função para extrair o setor do padrão UNIDADE/SETOR: [nome] ESCALA DE SERVIÇO:
-    """
-    # Procurar pela linha que contém UNIDADE/SETOR: 
-    for line in lines:
-        if 'UNIDADE/SETOR:' in line.upper():
-            # Usar regex para extrair o setor - mais flexível com espaços
-            match = re.search(r'UNIDADE/SETOR:\s*([^|\n]+?)\s*(?:ESCALA\s+DE\s+SERVIÇO:|$)', line, re.IGNORECASE)
-            if match:
-                setor = match.group(1).strip()
-                return setor
-    
-    return None
 
 def interpretar_turno(token):
     if not token or not isinstance(token, str):
@@ -1135,7 +1125,6 @@ def interpretar_turno(token):
         tokens = [token_clean[-1].upper()]
     else:
         tokens = list(token_clean.upper())
-
     turnos = []
     for t in tokens:
         if t == 'M':
@@ -1170,6 +1159,8 @@ def processar_pagina_pdf(b64_content, page_info=""):
 
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             for page_num, page in enumerate(pdf.pages):
+                # Tentar extrair tabelas primeiro
+                tables = page.extract_tables()
                 text = page.extract_text() or ""
                 lines = text.splitlines()
                 
@@ -1177,16 +1168,21 @@ def processar_pagina_pdf(b64_content, page_info=""):
                 lines = [l for l in lines if not l.strip().startswith("Governo do Estado")]
                 text = '\n'.join(lines)
 
-                # Extrair informações do cabeçalho
-                unidade_match = re.search(r'UNIDADE:\s*([^\n]+)', text, re.IGNORECASE)
-                nome_unidade = unidade_match.group(1).strip() if unidade_match else "NÃO INFORMADO"
-                
-                # Extrair setor
-                nome_setor = extrair_setor(text, lines)
-                if not nome_setor:
-                    nome_setor = "NÃO INFORMADO"
-                    print(f"AVISO: Setor não encontrado em {page_info}, página {page_num + 1}")
-                
+                # Extrair informações do cabeçalho a partir da tabela
+                nome_unidade = "NÃO INFORMADO"
+                nome_setor = "NÃO INFORMADO"
+                if tables and tables[0]:
+                    first_row = [str(cell or "").strip() for cell in tables[0][0] if cell]
+                    header_text = " ".join(first_row).upper()
+                    unidade_match = re.search(r'UNIDADE:\s*([^\n]+)', header_text, re.IGNORECASE)
+                    nome_unidade = unidade_match.group(1).strip() if unidade_match else "NÃO INFORMADO"
+                    setor_match = re.search(r'UNIDADE/SETOR:\s*([^\n]+?)\s*ESCALA\s+DE\s+SERVICO:', header_text, re.IGNORECASE)
+                    if setor_match:
+                        nome_setor = setor_match.group(1).strip()
+                    else:
+                        # Fallback para texto bruto se a tabela não contiver o setor
+                        nome_setor = extrair_setor(text, lines)
+
                 # Extrair mês e ano
                 mes, ano = parse_mes_ano(text)
                 if not mes or not ano:
@@ -1196,150 +1192,71 @@ def processar_pagina_pdf(b64_content, page_info=""):
                 print(f"Processando {page_info}, página {page_num + 1}: Unidade={nome_unidade}, Setor={nome_setor}, Mês={mes}/{ano}")
 
                 # Processar tabelas
-                tables = page.extract_tables()
-                
-                for table_num, table in enumerate(tables):
-                    header = {}
-                    for row in table:
-                        # Detectar cabeçalho da tabela
-                        if not header and any("NOME" in str(c).upper() for c in row if c):
-                            for i, col in enumerate(row):
-                                col_clean = (col or "").strip().upper()
-                                if "NOME" in col_clean: header["nome"] = i
-                                elif "CARGO" in col_clean: header["cargo"] = i
-                                elif "VÍNCULO" in col_clean or "VINCULO" in col_clean: header["vinculo"] = i
-                                elif "CRM" in col_clean or "CONSELHO" in col_clean: header["crm"] = i
-                                elif "MATRÍCULA" in col_clean or "MATRICULA" in col_clean: header["matricula"] = i
-                                elif re.fullmatch(r"\d{1,2}", col_clean): header[int(col_clean)] = i
-                            continue
+                if tables:
+                    for table_num, table in enumerate(tables):
+                        header = {}
+                        for row_idx, row in enumerate(table):
+                            if not header and any("NOME" in str(c).upper() for c in row if c):
+                                for i, col in enumerate(row):
+                                    col_clean = (col or "").strip().upper()
+                                    if "NOME" in col_clean: header["nome"] = i
+                                    elif "CARGO" in col_clean: header["cargo"] = i
+                                    elif "VÍNCULO" in col_clean or "VINCULO" in col_clean: header["vinculo"] = i
+                                    elif "CRM" in col_clean or "CONSELHO" in col_clean: header["crm"] = i
+                                    elif "MATRÍCULA" in col_clean or "MATRICULA" in col_clean: header["matricula"] = i
+                                    elif re.fullmatch(r"\d{1,2}", col_clean): header[int(col_clean)] = i
+                                continue
 
-                        # Se não tem cabeçalho definido ou não tem nome, pular
-                        if "nome" not in header or not row or not row[header["nome"]]:
-                            continue
+                            if "nome" not in header or not row or not row[header["nome"]]:
+                                continue
 
-                        # Extrair dados do profissional
-                        nome = str(row[header["nome"]]).replace('\n', ' ').strip()
-                        
-                        # Verificar se chegamos em "SERVIDOR QUE ESTA FORA DA ESCALA"
-                        if "SERVIDOR QUE ESTA FORA DA ESCALA" in nome.upper():
-                            break  # Parar de processar esta tabela
-                        
-                        crm = str(row[header.get("crm", -1)] or "").replace('\n', ' ').strip()
-                        cargo = str(row[header.get("cargo", -1)] or "").replace('\n', ' ').strip()
-                        vinculo = str(row[header.get("vinculo", -1)] or "").replace('\n', ' ').strip()
-                        matricula = str(row[header.get("matricula", -1)] or "").replace('\n', ' ').strip()
+                            nome = str(row[header["nome"]]).replace('\n', ' ').strip()
+                            if "SERVIDOR QUE ESTA FORA DA ESCALA" in nome.upper():
+                                break
 
-                        # Verificar se é médico PAES (em vínculo OU matrícula)
-                        texto_busca = f"{vinculo} {matricula}".upper()
-                        if "PAES" not in texto_busca:
-                            continue
+                            crm = str(row[header.get("crm", -1)] or "").replace('\n', ' ').strip()
+                            cargo = str(row[header.get("cargo", -1)] or "").replace('\n', ' ').strip()
+                            vinculo = str(row[header.get("vinculo", -1)] or "").replace('\n', ' ').strip()
+                            matricula = str(row[header.get("matricula", -1)] or "").replace('\n', ' ').strip()
 
-                        # Processar plantões
-                        plantoes = []
-                        for dia in range(1, 32):
-                            idx = header.get(dia)
-                            if idx is None or idx >= len(row): continue
-                            cell = row[idx]
-                            if not cell: continue
-                            
-                            for turno in interpretar_turno(str(cell)):
-                                data_plantao = datetime(ano, mes, dia)
-                                if turno["turno"] == "NOITE (fim)":
-                                    data_plantao += timedelta(days=1)
-                                horario = HORARIOS_TURNO[turno["turno"]]
-                                plantoes.append({
-                                    "dia": data_plantao.day,
-                                    "data": data_plantao.strftime("%d/%m/%Y"),
-                                    "turno": turno["turno"],
-                                    "inicio": horario["inicio"],
-                                    "fim": horario["fim"],
-                                    "setor": nome_setor,
-                                    "medico_setor": nome_setor
+                            if "PAES" not in f"{vinculo} {matricula}".upper():
+                                continue
+
+                            plantoes = []
+                            for dia in range(1, 32):
+                                idx = header.get(dia)
+                                if idx is None or idx >= len(row): continue
+                                cell = row[idx]
+                                if not cell: continue
+                                
+                                for turno in interpretar_turno(str(cell)):
+                                    data_plantao = datetime(ano, mes, dia)
+                                    if turno["turno"] == "NOITE (fim)":
+                                        data_plantao += timedelta(days=1)
+                                    horario = HORARIOS_TURNO[turno["turno"]]
+                                    plantoes.append({
+                                        "dia": data_plantao.day,
+                                        "data": data_plantao.strftime("%d/%m/%Y"),
+                                        "turno": turno["turno"],
+                                        "inicio": horario["inicio"],
+                                        "fim": horario["fim"],
+                                        "setor": nome_setor,
+                                        "medico_setor": nome_setor
+                                    })
+
+                            if plantoes:
+                                profissionais.append({
+                                    "medico_nome": nome,
+                                    "medico_crm": crm,
+                                    "medico_especialidade": cargo,
+                                    "medico_vinculo": vinculo,
+                                    "medico_setor": nome_setor,
+                                    "medico_unidade": nome_unidade,
+                                    "plantoes": dedup_plantao(plantoes)
                                 })
-
-                        if plantoes:
-                            profissionais.append({
-                                "medico_nome": nome,
-                                "medico_crm": crm,
-                                "medico_especialidade": cargo,
-                                "medico_vinculo": vinculo,
-                                "medico_setor": nome_setor,
-                                "medico_unidade": nome_unidade,
-                                "plantoes": dedup_plantao(plantoes)
-                            })
 
         return profissionais
     except Exception as e:
         print(f"Erro processando {page_info}: {str(e)}")
         return []
-
-@app.post("/normaliza-escala-MATERNIDADE-MATRICIAL")
-async def normaliza_escala_maternidade_matricial(request: Request):
-    try:
-        body = await request.json()
-        todos_profissionais = []
-
-        if isinstance(body, dict) and "pages" in body:
-            for page_data in body["pages"]:
-                b64 = page_data.get("file_base64")
-                page_number = page_data.get("page", "unknown")
-                if b64:
-                    profs = processar_pagina_pdf(b64, f"PDF página {page_number}")
-                    todos_profissionais.extend(profs)
-
-        elif isinstance(body, list):
-            for idx, item in enumerate(body):
-                if "data" in item and isinstance(item["data"], list):
-                    for page_data in item["data"]:
-                        b64 = page_data.get("base64") or page_data.get("bae64")
-                        page_number = page_data.get("page_number", "unknown")
-                        if b64:
-                            profs = processar_pagina_pdf(b64, f"Item {idx+1}, página {page_number}")
-                            todos_profissionais.extend(profs)
-                else:
-                    b64 = item.get("base64") or item.get("bae64")
-                    if b64:
-                        profs = processar_pagina_pdf(b64, f"Item {idx+1}")
-                        todos_profissionais.extend(profs)
-
-        # Agrupar por médico para consolidar diferentes escalas
-        medicos_consolidados = {}
-        for prof in todos_profissionais:
-            nome = prof["medico_nome"]
-            if nome not in medicos_consolidados:
-                medicos_consolidados[nome] = []
-            medicos_consolidados[nome].append(prof)
-        
-        # Criar lista final mantendo escalas separadas para cada médico
-        profissionais_final = []
-        for nome, escalas in medicos_consolidados.items():
-            if len(escalas) == 1:
-                # Médico aparece em apenas uma escala
-                profissionais_final.append(escalas[0])
-            else:
-                # Médico aparece em múltiplas escalas - manter separado por setor
-                for escala in escalas:
-                    profissionais_final.append(escala)
-        
-        profissionais_final.sort(key=lambda p: (p["medico_nome"], p["medico_setor"]))
-
-        # Determinar mês/ano da escala
-        mes_nome_str = "JUNHO"
-        ano = 2025
-        if profissionais_final:
-            primeiro_plantao = profissionais_final[0]["plantoes"][0] if profissionais_final[0]["plantoes"] else None
-            if primeiro_plantao:
-                data_parts = primeiro_plantao["data"].split("/")
-                mes = int(data_parts[1])
-                ano = int(data_parts[2])
-                mes_nome_str = [k for k, v in MONTH_MAP.items() if v == mes][0]
-
-        return JSONResponse(content=[{
-            "unidade_escala": "MISTA",
-            "mes_ano_escala": f"{mes_nome_str}/{ano}",
-            "profissionais": profissionais_final
-        }])
-
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
 # --- FIM normaliza-ESCALA-MATRIZ ---
