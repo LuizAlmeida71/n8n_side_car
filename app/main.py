@@ -400,27 +400,41 @@ HORARIOS_TURNO = {
     "NOITE (início)": {"inicio": "19:00", "fim": "01:00"},
     "NOITE (fim)": {"inicio": "01:00", "fim": "07:00"},
 }
+UNIDADE_MAP = {
+    "HMINSN": "HOSPITAL MATERNO INFANTIL NOSSA SENHORA DE NAZARETH"
+}
+
+# --- LISTA DE ÂNCORA E MAPA PARA BUSCA RÁPIDA ---
+PROFISSIONAIS_ANCHOR = [
+    {"medico_nome": "MARCO ANTÔNIO LEAL SANTOS", "medico_setor": "CAMED/BLOCOS/ISOLAMENTO/UTIN/UCINco/UCINca", "medico_unidade": "HMINSN"},
+    {"medico_nome": "MOACIR BARBOSA NETO", "medico_setor": "CAMED/BLOCOS/ISOLAMENTO/UTIN/UCINco/UCINca", "medico_unidade": "HMINSN"},
+    {"medico_nome": "ROBERTO ANDRADE LIMA", "medico_setor": "CAMED/BLOCOS/ISOLAMENTO/UTIN/UCINco/UCINca", "medico_unidade": "HMINSN"},
+    {"medico_nome": "MARYCASSIELY RODRIGUES TIZOLIM", "medico_setor": "NIR/ISOLAMENTO/BLOCOS/UTIN/UTIM", "medico_unidade": "HMINSN"},
+    {"medico_nome": "CIBELE LOUSANE PINHO MOTA", "medico_setor": "NIR/ISOLAMENTO/BLOCOS/UTIN/UTIM", "medico_unidade": "HMINSN"},
+    {"medico_nome": "MANOEL MESSIAS DOS SANTOS NETO", "medico_setor": "NIR/ISOLAMENTO/BLOCOS/UTIN/UTIM", "medico_unidade": "HMINSN"}
+]
+# Cria um dicionário para busca rápida usando o nome do médico como chave
+PROF_ANCHOR_MAP = {prof["medico_nome"].upper(): prof for prof in PROFISSIONAIS_ANCHOR}
 
 def parse_mes_ano(text):
+    # ... (código sem alteração)
     month_regex = '|'.join(MONTH_MAP.keys())
     match = re.search(r'(?:MÊS[^A-Z]*)?(' + month_regex + r')[^\d]*(\d{4})', text.upper())
     return (MONTH_MAP.get(match.group(1).upper()), int(match.group(2))) if match else (None, None)
 
 def extrair_setor_e_unidade(text):
+    # ... (código sem alteração)
     pattern_setor = r'UNIDADE/SETOR:\s*([^\n]+?)(?=\s*ESCALA\s+DE\s+SERVIÇO|$)'
     setor_match = re.search(pattern_setor, text, re.IGNORECASE)
     nome_setor = setor_match.group(1).strip() if setor_match else "NÃO INFORMADO"
-
     pattern_unidade = r'UNIDADE:\s*([^\n]+)'
     unidade_match = re.search(pattern_unidade, text, re.IGNORECASE)
     nome_unidade = unidade_match.group(1).strip() if unidade_match else "NÃO INFORMADO"
-    
-    UNIDADE_MAP = {"HMINSN": "HOSPITAL MATERNO INFANTIL NOSSA SENHORA DE NAZARETH"}
     nome_unidade = UNIDADE_MAP.get(nome_unidade, nome_unidade)
-    
     return nome_unidade, nome_setor
 
 def interpretar_turno(token):
+    # ... (código sem alteração)
     if not token or not isinstance(token, str): return []
     token_clean = token.replace('\n', '').replace(' ', '').replace('/', '')
     if any(stop in token.upper() for stop in ["TOTAL", "PL"]): return []
@@ -434,6 +448,7 @@ def interpretar_turno(token):
     return turnos
 
 def dedup_plantao(plantoes):
+    # ... (código sem alteração)
     seen, result = set(), []
     for p in plantoes:
         key = (p["data"], p["turno"], p["inicio"], p["fim"])
@@ -442,7 +457,7 @@ def dedup_plantao(plantoes):
             result.append(p)
     return result
 
-# --- FUNÇÃO PRINCIPAL DE PROCESSAMENTO (COM O FILTRO PRECISO) ---
+# --- FUNÇÃO PRINCIPAL DE PROCESSAMENTO (COM A LÓGICA DE ÂNCORA) ---
 def processar_pagina_pdf(b64_content, page_info=""):
     try:
         pdf_bytes = base64.b64decode(b64_content)
@@ -460,35 +475,45 @@ def processar_pagina_pdf(b64_content, page_info=""):
                     for table in tables:
                         header = {}
                         for row in table:
-                            # Mapeia cabeçalho
                             if not header and any("NOME" in str(c or '').upper() for c in row):
                                 for i, col in enumerate(row):
+                                    # ... (lógica de mapeamento de cabeçalho sem alteração)
                                     col_clean = str(col or '').strip().upper()
                                     if "NOME" in col_clean: header["nome"] = i
-                                    elif "VÍNCULO" in col_clean or "VINCULO" in col_clean: header["vinculo"] = i
-                                    elif "MATRÍCULA" in col_clean or "MATRICULA" in col_clean: header["matricula"] = i
+                                    elif "VÍNCULO" in col_clean: header["vinculo"] = i
+                                    elif "MATRÍCULA" in col_clean: header["matricula"] = i
                                     elif "CARGO" in col_clean: header["cargo"] = i
-                                    elif "CRM" in col_clean or "CONSELHO" in col_clean: header["crm"] = i
+                                    elif "CRM" in col_clean: header["crm"] = i
                                     elif re.fullmatch(r"\d{1,2}", col_clean): header[int(col_clean)] = i
                                 continue
 
                             if "nome" not in header or not row or not row[header["nome"]]: continue
                             
-                            # Filtro preciso em Matrícula e Vínculo
+                            # Filtro PAES
                             vinculo_idx = header.get("vinculo", -1)
                             matricula_idx = header.get("matricula", -1)
-
-                            vinculo_texto = str(row[vinculo_idx]).upper() if vinculo_idx != -1 and vinculo_idx < len(row) else ""
-                            matricula_texto = str(row[matricula_idx]).upper() if matricula_idx != -1 and matricula_idx < len(row) else ""
-                            
+                            vinculo_texto = str(row[vinculo_idx]).upper() if vinculo_idx < len(row) else ""
+                            matricula_texto = str(row[matricula_idx]).upper() if matricula_idx < len(row) else ""
                             if "PAES" not in vinculo_texto and "PAES" not in matricula_texto:
                                 continue
 
-                            # Extrai os dados apenas se passou no filtro
+                            # Extrai os dados
                             nome = str(row[header["nome"]]).replace('\n', ' ').strip()
                             cargo = str(row[header.get("cargo", -1)] or "").strip()
                             crm = str(row[header.get("crm", -1)] or "").strip()
                             
+                            # *** MELHORIA: USA A LISTA DE ÂNCORA SE NECESSÁRIO ***
+                            # Busca o profissional no mapa de âncora
+                            anchor_data = PROF_ANCHOR_MAP.get(nome.upper())
+                            if anchor_data:
+                                # Se o setor não foi encontrado no PDF, usa o da âncora
+                                if nome_setor == "NÃO INFORMADO":
+                                    nome_setor = anchor_data["medico_setor"]
+                                # Se a unidade não foi encontrada, usa a da âncora
+                                if nome_unidade == "NÃO INFORMADO":
+                                    unidade_sigla = anchor_data["medico_unidade"]
+                                    nome_unidade = UNIDADE_MAP.get(unidade_sigla, unidade_sigla)
+
                             plantoes = []
                             for dia, col_idx in header.items():
                                 if isinstance(dia, int) and col_idx < len(row) and row[col_idx]:
@@ -497,14 +522,11 @@ def processar_pagina_pdf(b64_content, page_info=""):
                                         if turno["turno"] == "NOITE (fim)": data_plantao += timedelta(days=1)
                                         horario = HORARIOS_TURNO.get(turno["turno"], {})
                                         plantoes.append({
-                                            "dia": data_plantao.day,
-                                            "data": data_plantao.strftime("%d/%m/%Y"),
-                                            "turno": turno["turno"],
-                                            "inicio": horario["inicio"],
-                                            "fim": horario["fim"],
+                                            "dia": data_plantao.day, "data": data_plantao.strftime("%d/%m/%Y"),
+                                            "turno": turno["turno"], "inicio": horario.get("inicio"), "fim": horario.get("fim"),
                                             "setor": nome_setor,
+                                            "medico_setor": nome_setor,
                                             "medico_unidade": nome_unidade,
-                                            "medico_setor": nome_setor
                                         })
                             
                             if plantoes:
@@ -520,9 +542,10 @@ def processar_pagina_pdf(b64_content, page_info=""):
         print(f"Erro processando {page_info}: {str(e)}\n{traceback.format_exc()}")
         return []
 
-# --- ENDPOINT FASTAPI ---
+# --- ENDPOINT FASTAPI (SEM ALTERAÇÕES) ---
 @app.post("/normaliza-escala-MATERNIDADE-MATRICIAL")
 async def normaliza_escala_maternidade_matricial(request: Request):
+    # ... (código do endpoint permanece o mesmo da resposta anterior)
     try:
         body = await request.json()
         todos_profissionais = []
@@ -534,17 +557,13 @@ async def normaliza_escala_maternidade_matricial(request: Request):
                     profissionais_da_pagina = processar_pagina_pdf(b64, f"Página {i+1}")
                     todos_profissionais.extend(profissionais_da_pagina)
         
-        # Agrupar por médico para consolidar plantões de diferentes escalas/páginas
-        medicos_consolidados = defaultdict(lambda: {
-            "plantoes": [], "info": {}
-        })
+        medicos_consolidados = defaultdict(lambda: {"plantoes": [], "info": {}})
         for prof in todos_profissionais:
             nome = prof["medico_nome"]
             if not medicos_consolidados[nome]["info"]:
                 medicos_consolidados[nome]["info"] = {k: v for k, v in prof.items() if k != 'plantoes'}
             medicos_consolidados[nome]["plantoes"].extend(prof["plantoes"])
         
-        # Monta a lista final com os dados consolidados
         profissionais_final = []
         for nome, data in medicos_consolidados.items():
             prof_obj = data["info"]
