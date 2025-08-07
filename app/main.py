@@ -18,6 +18,8 @@ import uvicorn # Adicionado para o bloco __main__
 
 app = FastAPI()
 
+app.include_router(hgr_router)
+
 # --- DEFINIÇÕES GLOBAIS E FUNÇÕES AUXILIARES (CONSOLIDADAS) ---
 
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
