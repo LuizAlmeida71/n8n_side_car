@@ -1,6 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.responses import JSONResponse
 from openpyxl import Workbook, load_workbook
+from hgr import router as hgr_router
 import tempfile
 import fitz  # PyMuPDF
 import base64
