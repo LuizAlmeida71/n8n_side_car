@@ -1,13 +1,12 @@
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
-import fitz  # PyMuPDF
-import base64
+from pydantic import BaseModel
+from typing import List, Optional
 import re
 
 router = APIRouter()
 
-# Mapeamento de Setor para Carimbo
-SETOR_CARIMBO = {
+# Mapeamento de setores para carimbo
+SETOR_CARIMBO_MAP = {
     "PARECER": "Parecer",
     "HGR PRESCRIÇÃO CLINICOS DA CIRURGIA GERAL- BLOCO F": "Bloco F",
     "EMERGÊNCIA PARA TODAS UTI´S": "Emergência",
@@ -31,84 +30,70 @@ SETOR_CARIMBO = {
     "CONSULTORIOS": "Consultorios",
     "OBSERVAÇÃO": "Observação",
     "ÁREA DE SUTURA": "Sutura",
-    "RCP SALA DE ESTABILIZAÇÃO": "Estabilização",
+    "RCP SALA DE ESTABILIZAÇÃO": "Estabilização"
 }
 
-SIGLAS_VALIDAS = ["M", "T", "N", "D", "PJM", "CHM", "PSS1", "CH"]
+class Pagina(BaseModel):
+    page_number: int
+    filename: str
+    base64: str
+    text: str
 
 @router.post("/classifica-paginas-hgr")
-async def classifica_paginas_hgr(request: Request):
-    try:
-        paginas = await request.json()
-        resultado = []
-        ultima_classificacao_valida = None
+def classifica_paginas_hgr(paginas: List[Pagina]):
+    resultados = []
+    ultima_classificacao_valida = None
+    ultima_carimbo_valido = None
 
-        for idx, pagina in enumerate(paginas):
-            base64_pdf = pagina.get("base64") or pagina.get("bae64")  # fallback
-            filename = pagina.get("filename")
-            page_number = pagina.get("page_number")
+    for i, pagina in enumerate(paginas):
+        texto = pagina.text.upper()
+        texto_original = pagina.text
+        classificacao = "padrao_nao_localizado"
+        carimbo = None
 
-            if not base64_pdf:
-                resultado.append({"page_number": page_number, "classificacao": "erro_sem_base64", "carimbo": None})
-                continue
+        # Verifica se há cabeçalho com SETOR ou UNIDADE/SETOR
+        match = re.search(r"(UNIDADE/SETOR|SETOR)[\s:.-]*(.+)", texto)
+        setor_extraido = None
+        if match:
+            setor_extraido = match.group(2).strip().splitlines()[0].strip(":-• ")
 
-            try:
-                pdf_bytes = base64.b64decode(base64_pdf)
-                doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-                texto = "\n".join(page.get_text() for page in doc)
-            except Exception:
-                resultado.append({"page_number": page_number, "classificacao": "erro_pdf_invalido", "carimbo": None})
-                continue
-
-            texto_normalizado = texto.upper()
-
-            # Verifica se é retificação
-            if "RETIFICAÇÃO" in texto_normalizado or "ALTERAÇÃO" in texto_normalizado:
-                # Marca a anterior como descartada
-                for r in reversed(resultado):
-                    if r["classificacao"] not in ["descartada", "erro_pdf_invalido", "erro_sem_base64"]:
-                        r["classificacao"] = "descartada"
-                        break
-                resultado.append({"page_number": page_number, "classificacao": "retificada", "carimbo": ultima_classificacao_valida})
-                continue
-
-            # Tenta localizar cabeçalho
-            match = re.search(r"(SETOR|UNIDADE/SETOR)\s*[:\-\s]?\s*(.+)", texto, re.IGNORECASE)
-            if match:
-                setor_extraido = match.group(2).strip().upper()
-
-                carimbo = None
-                for padrao, nome_carimbo in SETOR_CARIMBO.items():
-                    if padrao.upper() in setor_extraido:
-                        carimbo = nome_carimbo
-                        break
-
-                classificacao = carimbo if carimbo else "padrao_nao_localizado"
-                ultima_classificacao_valida = classificacao if carimbo else ultima_classificacao_valida
-
-                resultado.append({
-                    "page_number": page_number,
-                    "classificacao": classificacao,
-                    "carimbo": carimbo
-                })
+        if setor_extraido:
+            # Verifica se casa com algum padrão da lista
+            for chave in SETOR_CARIMBO_MAP:
+                if chave.upper() in setor_extraido:
+                    classificacao = SETOR_CARIMBO_MAP[chave]
+                    carimbo = SETOR_CARIMBO_MAP[chave]
+                    ultima_classificacao_valida = classificacao
+                    ultima_carimbo_valido = carimbo
+                    break
             else:
-                # Verifica se há dados de escala (siglas, nomes, etc.)
-                tem_dados = any(sigla in texto_normalizado for sigla in SIGLAS_VALIDAS)
-                if tem_dados and ultima_classificacao_valida:
-                    resultado.append({
-                        "page_number": page_number,
-                        "classificacao": ultima_classificacao_valida,
-                        "carimbo": ultima_classificacao_valida
-                    })
-                else:
-                    resultado.append({
-                        "page_number": page_number,
-                        "classificacao": "descartada",
-                        "carimbo": None
-                    })
+                classificacao = "padrao_nao_localizado"
+                carimbo = None
+        else:
+            # Verifica se é retificação
+            if "RETIFICAÇÃO" in texto or "ALTERAÇÃO" in texto:
+                classificacao = "retificada"
+                carimbo = ultima_carimbo_valido
+                # Descarta a última se for válida
+                if resultados:
+                    for j in range(len(resultados) - 1, -1, -1):
+                        if resultados[j]["classificacao"] not in ["descartada", "retificada"]:
+                            resultados[j]["classificacao"] = "descartada"
+                            break
+            # Verifica se contém dados úteis
+            elif re.search(r"(PSS|CH|PJ|M|T|N|D)", texto) and re.search(r"[A-Z][a-z]+\s+[A-Z][a-z]+", texto):
+                classificacao = ultima_classificacao_valida or "padrao_nao_localizado"
+                carimbo = ultima_carimbo_valido
+            else:
+                classificacao = "descartada"
+                carimbo = ultima_carimbo_valido
 
-        return JSONResponse(content=resultado)
+        resultados.append({
+            "page_number": pagina.page_number,
+            "filename": pagina.filename,
+            "base64": pagina.base64,
+            "classificacao": classificacao,
+            "carimbo": carimbo
+        })
 
-    except Exception as e:
-        import traceback
-        return JSONResponse(content={"error": str(e), "trace": traceback.format_exc()}, status_code=500)
+    return resultados
