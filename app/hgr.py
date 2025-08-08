@@ -1,6 +1,8 @@
-from fastapi import APIRouter, Request
+from fastapi import APIRouter
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List
+import base64
+import fitz  # PyMuPDF
 import re
 
 router = APIRouter()
@@ -37,7 +39,6 @@ class Pagina(BaseModel):
     page_number: int
     filename: str
     base64: str
-    text: str
 
 @router.post("/classifica-paginas-hgr")
 def classifica_paginas_hgr(paginas: List[Pagina]):
@@ -45,20 +46,26 @@ def classifica_paginas_hgr(paginas: List[Pagina]):
     ultima_classificacao_valida = None
     ultima_carimbo_valido = None
 
-    for i, pagina in enumerate(paginas):
-        texto = pagina.text.upper()
-        texto_original = pagina.text
+    for pagina in paginas:
+        # Extrai o texto da página PDF (base64 → binário → PyMuPDF)
+        try:
+            binario = base64.b64decode(pagina.base64)
+            doc = fitz.open("pdf", binario)
+            texto = "\n".join([page.get_text() for page in doc])
+        except Exception:
+            texto = ""
+
+        texto_up = texto.upper()
         classificacao = "padrao_nao_localizado"
         carimbo = None
 
         # Verifica se há cabeçalho com SETOR ou UNIDADE/SETOR
-        match = re.search(r"(UNIDADE/SETOR|SETOR)[\s:.-]*(.+)", texto)
+        match = re.search(r"(UNIDADE/SETOR|SETOR)[\s:.-]*(.+)", texto_up)
         setor_extraido = None
         if match:
             setor_extraido = match.group(2).strip().splitlines()[0].strip(":-• ")
 
         if setor_extraido:
-            # Verifica se casa com algum padrão da lista
             for chave in SETOR_CARIMBO_MAP:
                 if chave.upper() in setor_extraido:
                     classificacao = SETOR_CARIMBO_MAP[chave]
@@ -70,18 +77,15 @@ def classifica_paginas_hgr(paginas: List[Pagina]):
                 classificacao = "padrao_nao_localizado"
                 carimbo = None
         else:
-            # Verifica se é retificação
-            if "RETIFICAÇÃO" in texto or "ALTERAÇÃO" in texto:
+            if "RETIFICAÇÃO" in texto_up or "ALTERAÇÃO" in texto_up:
                 classificacao = "retificada"
                 carimbo = ultima_carimbo_valido
-                # Descarta a última se for válida
-                if resultados:
-                    for j in range(len(resultados) - 1, -1, -1):
-                        if resultados[j]["classificacao"] not in ["descartada", "retificada"]:
-                            resultados[j]["classificacao"] = "descartada"
-                            break
-            # Verifica se contém dados úteis
-            elif re.search(r"(PSS|CH|PJ|M|T|N|D)", texto) and re.search(r"[A-Z][a-z]+\s+[A-Z][a-z]+", texto):
+                # Descarta a última válida
+                for j in range(len(resultados) - 1, -1, -1):
+                    if resultados[j]["classificacao"] not in ["descartada", "retificada"]:
+                        resultados[j]["classificacao"] = "descartada"
+                        break
+            elif re.search(r"(PSS|CH|PJ|M|T|N|D)", texto_up) and re.search(r"[A-Z][a-z]+\s+[A-Z][a-z]+", texto_up):
                 classificacao = ultima_classificacao_valida or "padrao_nao_localizado"
                 carimbo = ultima_carimbo_valido
             else:
