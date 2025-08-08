@@ -47,7 +47,6 @@ def classifica_paginas_hgr(paginas: List[Pagina]):
     ultima_carimbo_valido = None
 
     for pagina in paginas:
-        # Extrai o texto da página PDF (base64 → binário → PyMuPDF)
         try:
             binario = base64.b64decode(pagina.base64)
             doc = fitz.open("pdf", binario)
@@ -59,7 +58,6 @@ def classifica_paginas_hgr(paginas: List[Pagina]):
         classificacao = "padrao_nao_localizado"
         carimbo = None
 
-        # Verifica se há cabeçalho com SETOR ou UNIDADE/SETOR
         match = re.search(r"(UNIDADE/SETOR|SETOR)[\s:.-]*(.+)", texto_up)
         setor_extraido = None
         if match:
@@ -74,20 +72,25 @@ def classifica_paginas_hgr(paginas: List[Pagina]):
                     ultima_carimbo_valido = carimbo
                     break
             else:
-                classificacao = "padrao_nao_localizado"
+                classificacao = "desconhecida"
                 carimbo = None
+
         else:
             if "RETIFICAÇÃO" in texto_up or "ALTERAÇÃO" in texto_up:
                 classificacao = "retificada"
                 carimbo = ultima_carimbo_valido
-                # Descarta a última válida
                 for j in range(len(resultados) - 1, -1, -1):
                     if resultados[j]["classificacao"] not in ["descartada", "retificada"]:
                         resultados[j]["classificacao"] = "descartada"
                         break
-            elif re.search(r"(PSS|CH|PJ|M|T|N|D)", texto_up) and re.search(r"[A-Z][a-z]+\s+[A-Z][a-z]+", texto_up):
-                classificacao = ultima_classificacao_valida or "padrao_nao_localizado"
-                carimbo = ultima_carimbo_valido
+
+            elif re.search(r"(PSS|CH|PJ|M|T|N|D)", texto_up) and re.search(r"[A-Z][a-z]{2,}\s+[A-Z][a-z]{2,}", texto):
+                if ultima_classificacao_valida:
+                    classificacao = ultima_classificacao_valida
+                    carimbo = ultima_carimbo_valido
+                else:
+                    classificacao = "desconhecida"
+                    carimbo = None
             else:
                 classificacao = "descartada"
                 carimbo = ultima_carimbo_valido
